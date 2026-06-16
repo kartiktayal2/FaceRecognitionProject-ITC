@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Face Recognition Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+</head>
+
+<body class="bg-gray-900 text-white min-h-screen">
+
+  <div class="max-w-7xl mx-auto p-6">
+
+    <!-- Header -->
+    <div class="mb-6 text-center">
+      <h1 class="text-3xl md:text-4xl font-bold text-yellow-300">LIVE CAMERA FEED</h1>
+      <p class="text-gray-400 text-sm md:text-base">CAMERA 04 - RECEPTION AREA</p>
+    </div>
+
+    <!-- Live Camera Feed -->
+    <div class="bg-gray-800 rounded-xl p-4 mb-6 text-center">
+      <img src="/video_feed" class="rounded-lg w-full border-2 border-gray-700">
+    </div>
+
+    <!-- Statistics (always one row) -->
+    <div class="grid grid-cols-3 gap-2 mb-6 text-center">
+      <div class="bg-gray-800 rounded-lg p-3">
+        <h2 class="text-yellow-400 text-xs font-semibold">TOTAL USER</h2>
+        <p class="text-lg md:text-2xl font-bold text-white mt-1" id="total_users">{{ total_users }}</p>
+      </div>
+      <div class="bg-gray-800 rounded-lg p-3">
+        <h2 class="text-red-500 text-xs font-semibold">UNKNOWN USER</h2>
+        <p class="text-lg md:text-2xl font-bold text-white mt-1" id="unknown_count">{{ unknown_count }}</p>
+      </div>
+      <div class="bg-gray-800 rounded-lg p-3">
+        <h2 class="text-green-500 text-xs font-semibold">KNOWN USER</h2>
+        <p class="text-lg md:text-2xl font-bold text-white mt-1" id="total_visits">{{ total_visits }}</p>
+      </div>
+    </div>
+
+    <!-- Registered Users -->
+    <div class="bg-gray-800 rounded-xl shadow-lg overflow-hidden mb-6">
+      <div class="bg-gray-700 p-4">
+        <h2 class="text-yellow-400 font-bold text-lg md:text-xl">REGISTERED USERS</h2>
+      </div>
+      <table class="w-full text-gray-300 text-sm md:text-base" id="users_table">
+        <thead class="bg-gray-700 text-yellow-400">
+          <tr>
+            <th class="p-3 text-left">Name</th>
+            <th class="p-3 text-left">Visit Count</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for user in users %}
+          <tr class="border-b border-gray-700 hover:bg-gray-700">
+            <td class="p-3">{{ user[0] }}</td>
+            <td class="p-3 font-semibold">{{ user[1] }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Recent Activity -->
+    <div class="bg-gray-800 rounded-xl shadow-lg overflow-hidden mb-6">
+      <div class="bg-gray-700 p-4">
+        <h2 class="text-yellow-400 font-bold text-lg md:text-xl">RECENT ACTIVITY LOG</h2>
+      </div>
+      <table class="w-full text-gray-300 text-sm md:text-base" id="logs_table">
+        <thead class="bg-gray-700 text-yellow-400">
+          <tr>
+            <th class="p-3 text-left">User</th>
+            <th class="p-3 text-left">Status</th>
+            <th class="p-3 text-left">Time</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for log in logs %}
+          <tr class="border-b border-gray-700 hover:bg-gray-700">
+            <td class="p-3">{{ log[0] }}</td>
+            <td class="p-3">
+              {% if log[1] == 'KNOWN' %}
+                <span class="text-green-400 font-semibold">Known</span>
+              {% else %}
+                <span class="text-red-400 font-semibold">Unknown</span>
+              {% endif %}
+            </td>
+            <td class="p-3 text-gray-400">{{ log[2] }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Register New User Button -->
+    <div class="text-center mt-6">
+      <button onclick="openRegisterModal()" class="bg-blue-500 hover:bg-blue-600 text-white px-5 py-2 rounded-lg font-semibold text-sm md:text-base">
+        Register New User
+      </button>
+    </div>
+
+    <!-- Registration Modal -->
+    <div id="registerModal" class="fixed inset-0 bg-black bg-opacity-50 hidden flex items-center justify-center">
+      <div class="bg-gray-800 rounded-xl p-6 w-11/12 max-w-md">
+        <h2 class="text-yellow-400 font-bold text-xl mb-4">Register New User</h2>
+        <form id="registerForm">
+          <input type="text" id="name" placeholder="Name" class="w-full p-2 mb-3 rounded bg-gray-700 text-white" required>
+          <input type="email" id="email" placeholder="Email" class="w-full p-2 mb-3 rounded bg-gray-700 text-white" required>
+          <video id="registerVideo" autoplay class="w-full rounded mb-3"></video>
+          <canvas id="registerCanvas" class="hidden"></canvas>
+          <div class="flex justify-between mt-4">
+            <button type="button" onclick="captureRegisterImage()" class="bg-yellow-400 hover:bg-yellow-500 text-black px-4 py-2 rounded">Capture</button>
+            <button type="submit" class="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded">Submit</button>
+            <button type="button" onclick="closeRegisterModal()" class="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded">Cancel</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Back Button -->
+    <div class="text-center mt-6">
+      <a href="/" class="bg-yellow-400 hover:bg-yellow-500 text-black px-5 py-2 rounded-lg font-semibold text-sm md:text-base">
+        Back To Home
+      </a>
+    </div>
+
+  </div>
+  
+
+
+    <!-- JavaScript: Voice + Dashboard Refresh + Registration -->
+  <script>
+    let lastSpoken = "";
+    let availableVoices = [];
+    speechSynthesis.onvoiceschanged = () => {
+      availableVoices = speechSynthesis.getVoices();
+    };
+
+    function speak(text) {
+      if (text && text !== lastSpoken) {
+        lastSpoken = text;
+        const utterance = new SpeechSynthesisUtterance(text);
+        const selectedVoice = availableVoices.find(v => v.name.includes("Female")) 
+                           || availableVoices.find(v => v.lang === "en-US");
+        if (selectedVoice) utterance.voice = selectedVoice;
+        utterance.rate = 1;
+        utterance.pitch = 1;
+        speechSynthesis.speak(utterance);
+      }
+    }
+
+    function refreshDashboard() {
+      fetch("/dashboard-data")
+        .then(res => res.json())
+        .then(data => {
+          document.getElementById("total_users").innerText = data.total_users;
+          document.getElementById("unknown_count").innerText = data.unknown_count;
+          document.getElementById("total_visits").innerText = data.total_visits;
+
+          // Update users table
+          let usersHTML = "";
+          data.users.forEach(u => {
+            usersHTML += `<tr class="border-b border-gray-700 hover:bg-gray-700">
+              <td class="p-3">${u[0]}</td>
+              <td class="p-3 font-semibold">${u[1]}</td>
+            </tr>`;
+          });
+          document.querySelector("#users_table tbody").innerHTML = usersHTML;
+
+          // Update logs table + speak latest
+          let logsHTML = "";
+          if (data.logs.length > 0) {
+            let latestLog = data.logs[0];
+            if (latestLog[0] === "Unknown") {
+              speak("An unknown visitor has been detected");
+            } else {
+              speak(`Welcome ${latestLog[0]}`);
+            }
+          }
+          data.logs.forEach(l => {
+            logsHTML += `<tr class="border-b border-gray-700 hover:bg-gray-700">
+              <td class="p-3">${l[0]}</td>
+              <td class="p-3">${l[1] === 'KNOWN' ? '<span class="text-green-400 font-semibold">Known</span>' : '<span class="text-red-400 font-semibold">Unknown</span>'}</td>
+              <td class="p-3 text-gray-400">${l[2]}</td>
+            </tr>`;
+          });
+          document.querySelector("#logs_table tbody").innerHTML = logsHTML;
+        });
+    }
+
+    setInterval(refreshDashboard, 5000);
+
+    // 🔵 Registration Modal Functions
+    function openRegisterModal() {
+
+  fetch("/pause-camera")
+    .then(() => {
+
+      document.getElementById("registerModal")
+        .classList.remove("hidden");
+
+      navigator.mediaDevices.getUserMedia({ video: true })
+        .then(stream => {
+          document.getElementById("registerVideo").srcObject = stream;
+        })
+        .catch(err => {
+          alert("Camera access denied: " + err);
+          fetch("/resume-camera");
+        });
+
+    });
+
+}
+
+function closeRegisterModal() {
+
+  document.getElementById("registerModal")
+    .classList.add("hidden");
+
+  let video = document.getElementById("registerVideo");
+
+  if (video.srcObject) {
+    video.srcObject.getTracks().forEach(track => track.stop());
+  }
+
+  fetch("/resume-camera");
+}
+
+    function captureRegisterImage() {
+      let video = document.getElementById("registerVideo");
+      let canvas = document.getElementById("registerCanvas");
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      let ctx = canvas.getContext("2d");
+      ctx.drawImage(video, 0, 0);
+    }
+
+    document.addEventListener("DOMContentLoaded", () => {
+      document.getElementById("registerForm").addEventListener("submit", function(e) {
+        e.preventDefault();
+        let canvas = document.getElementById("registerCanvas");
+        let imageData = canvas.toDataURL("image/jpeg");
+        let name = document.getElementById("name").value;
+        let email = document.getElementById("email").value;
+
+        fetch("/register-camera", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: name, email: email, image: imageData })
+        })
+        .then(res => res.text())
+        .then(msg => {
+          alert(msg);
+          speak("New user registered successfully"); // 🔊 voice feedback
+          closeRegisterModal();
+          refreshDashboard();
+        });
+      });
+    });
+  </script>
+</body>
+</html>

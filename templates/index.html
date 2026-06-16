@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+
+<html>
+<head>
+    <title>Face Recognition System</title>
+</head>
+<body>
+
+
+<h1>Face Recognition System</h1>
+
+<h2>Real-Time Face Recognition</h2>
+
+<video id="video" width="400" autoplay></video>
+
+<br><br>
+
+<br><br>
+
+<p id="status"></p>
+<div id="result"></div>
+
+<img id="preview" width="300">
+
+<canvas id="canvas" style="display:none;"></canvas>
+
+<br><br>
+
+<a href="/register-page">
+    Register New User
+</a>
+
+<br><br>
+
+<a href="/dashboard" class="bg-blue-600 text-white px-4 py-2 rounded">
+    View Dashboard
+</a>
+
+
+
+<script>
+
+let capturedImage = "";
+let lastResult = "";
+
+navigator.mediaDevices.getUserMedia({ video: true })
+.then(function(stream){
+    document.getElementById("video").srcObject = stream;
+});
+
+function captureImage(){
+
+    let video = document.getElementById("video");
+    let canvas = document.getElementById("canvas");
+
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    let ctx = canvas.getContext("2d");
+
+    ctx.drawImage(video, 0, 0);
+
+    capturedImage = canvas.toDataURL("image/jpeg");
+
+    document.getElementById("preview").src = capturedImage;
+
+    document.getElementById("status").innerHTML =
+    "Image Captured Successfully";
+}
+
+function scanFace(){
+
+    if(capturedImage == ""){
+        alert("Please capture image first");
+        return;
+    }
+
+    fetch("/scan-camera", {
+
+        method: "POST",
+
+        headers: {
+            "Content-Type": "application/json"
+        },
+
+        body: JSON.stringify({
+            image: capturedImage
+        })
+
+    })
+    .then(response => response.text())
+    .then(data => {
+
+        if(data != lastResult){
+
+            lastResult = data;
+
+            document.getElementById("result").innerHTML =
+            data;
+
+            let tempDiv = document.createElement("div");
+
+            tempDiv.innerHTML = data;
+
+            let cleanText = tempDiv.innerText;
+
+            let speech =
+            new SpeechSynthesisUtterance(cleanText);
+
+            speechSynthesis.speak(speech);
+
+        }
+
+});
+
+}
+setInterval(function(){
+
+    captureImage();
+
+    scanFace();
+
+},3000);
+
+</script>
+
+</body>
+</html>

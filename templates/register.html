@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Register User</title>
+</head>
+<body>
+
+<h2>Register User</h2>
+
+<input type="text" id="name" placeholder="Name">
+<br><br>
+
+<input type="email" id="email" placeholder="Email">
+<br><br>
+
+<video id="video" width="400" autoplay></video>
+
+<br><br>
+
+<button onclick="capture()">Capture & Register</button>
+
+<canvas id="canvas" style="display:none;"></canvas>
+
+<script>
+
+navigator.mediaDevices.getUserMedia({ video: true })
+.then(function(stream){
+    document.getElementById("video").srcObject = stream;
+});
+
+function capture(){
+
+    let video = document.getElementById("video");
+    let canvas = document.getElementById("canvas");
+
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    let ctx = canvas.getContext("2d");
+    ctx.drawImage(video, 0, 0);
+
+    let image = canvas.toDataURL("image/jpeg");
+
+    fetch("/register-camera", {
+        method: "POST",
+        headers: {
+            "Content-Type":"application/json"
+        },
+        body: JSON.stringify({
+            name: document.getElementById("name").value,
+            email: document.getElementById("email").value,
+            image: image
+        })
+    })
+    .then(res => res.text())
+    .then(data => alert(data));
+}
+
+</script>
+
+</body>
+</html>

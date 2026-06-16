@@ -1,0 +1,568 @@
+import base64
+import cv2
+from flask import Flask, render_template, request
+import sqlite3
+import face_recognition
+import numpy as np
+import json 
+from flask import Flask, render_template, request, Response
+last_seen = {}
+COUNT_INTERVAL = 10
+last_unknown_seen = None
+camera = cv2.VideoCapture(0)
+
+app = Flask(__name__)
+@app.route('/register-page')
+def register_page():
+    return render_template("register.html")
+
+@app.route('/')
+def home():
+    return render_template("index.html")
+
+@app.route('/register-camera', methods=['POST'])
+def register_camera():
+
+    data = request.json
+
+    name = data["name"]
+    email = data["email"]
+
+    image_data = data["image"]
+
+    image_data = image_data.split(",")[1]
+
+    image_bytes = base64.b64decode(image_data)
+
+    with open("temp.jpg", "wb") as f:
+        f.write(image_bytes)
+
+    image = face_recognition.load_image_file("temp.jpg")
+
+    encodings = face_recognition.face_encodings(image)
+
+    if len(encodings) == 0:
+        return "No face detected"
+
+    encoding = encodings[0]
+
+    conn = sqlite3.connect("database.db")
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        INSERT INTO users(name,email,face_encoding)
+        VALUES(?,?,?)
+        """,
+        (
+            name,
+            email,
+            json.dumps(encoding.tolist())
+        )
+    )
+
+    conn.commit()
+    conn.close()
+
+    return "User Registered Successfully"
+
+@app.route('/scan', methods=['POST'])
+def scan():
+
+    image_file = request.files['image']
+
+    image = face_recognition.load_image_file(image_file)
+
+    encodings = face_recognition.face_encodings(image)
+
+    if len(encodings) == 0:
+        return "No face detected"
+
+    uploaded_encoding = encodings[0]
+
+    conn = sqlite3.connect("database.db")
+    cur = conn.cursor()
+
+    cur.execute(
+        "SELECT id,name,email,face_encoding FROM users"
+    )
+
+    users = cur.fetchall()
+
+    conn.close()
+
+    for user in users:
+
+        stored_encoding = np.array(
+            json.loads(user[3])
+        )
+
+        distance = face_recognition.face_distance(
+            [stored_encoding],
+            uploaded_encoding
+        )[0]
+
+        print("Checking:", user[1])
+        print("Distance:", distance)
+
+        if distance < 0.60:
+
+            return f"""
+            <h1>{user[1]}</h1>
+            <p>ID: {user[0]}</p>
+            <p>Email: {user[2]}</p>
+            """
+    return "User Not Found"
+
+@app.route('/dashboard-data')
+def dashboard_data():
+    conn = sqlite3.connect("database.db")
+    cur = conn.cursor()
+
+    cur.execute("SELECT name, visit_count FROM users")
+    users = cur.fetchall()
+
+    cur.execute("SELECT COUNT(*) FROM users")
+    total_users = cur.fetchone()[0]
+
+    cur.execute("SELECT SUM(visit_count) FROM users")
+    total_visits = cur.fetchone()[0] or 0
+
+    cur.execute("SELECT unknown_count FROM stats WHERE id = 1")
+    unknown_count = cur.fetchone()[0]
+
+    cur.execute("""
+        SELECT user_name, status, visit_time
+        FROM visitor_logs
+        ORDER BY id DESC
+        LIMIT 10
+    """)
+    logs = cur.fetchall()
+
+    conn.close()
+
+    return {
+        "users": users,
+        "logs": logs,
+        "total_users": total_users,
+        "total_visits": total_visits,
+        "unknown_count": unknown_count
+    }
+
+
+@app.route('/scan-camera', methods=['POST'])
+def scan_camera():
+    data = request.json
+
+    image_data = data["image"]
+    image_data = image_data.split(",")[1]
+
+    image_bytes = base64.b64decode(image_data)
+
+    with open("temp_scan.jpg", "wb") as f:
+        f.write(image_bytes)
+
+    image = face_recognition.load_image_file("temp_scan.jpg")
+
+    encodings = face_recognition.face_encodings(image)
+
+    if len(encodings) == 0:
+        return "No face detected"
+
+    uploaded_encoding = encodings[0]
+
+    conn = sqlite3.connect("database.db")
+    cur = conn.cursor()
+
+    cur.execute(
+    "SELECT id,name,email,face_encoding FROM users"
+    )
+
+    users = cur.fetchall()
+
+    conn.close()
+
+    for user in users:
+
+        stored_encoding = np.array(
+            json.loads(user[3])
+        )
+
+        distance = face_recognition.face_distance(
+            [stored_encoding],
+            uploaded_encoding
+        )[0]
+
+        print("Checking:", user[1])
+        print("Distance:", distance)
+        
+        if distance < 0.60:
+
+            conn_log = sqlite3.connect("database.db")
+            cur_log = conn_log.cursor()
+
+            from datetime import datetime
+
+            current_time = datetime.now()
+
+            should_count = False
+
+            if user[1] not in last_seen:
+
+                should_count = True
+
+            else:
+
+                difference = (
+                    current_time - last_seen[user[1]]
+                ).total_seconds()
+
+                print("Difference =", difference)
+
+                if difference > COUNT_INTERVAL:   # testing
+                    should_count = True
+
+                    print("Should Count After =", should_count)
+
+            if should_count:
+                last_seen[user[1]] = current_time
+
+                cur_log.execute(
+                    """
+                    INSERT INTO visitor_logs(user_name,status)
+                    VALUES(?,?)
+                    """,
+                    (user[1], "KNOWN")
+                )
+
+                cur_log.execute(
+                    """
+                    UPDATE users
+                    SET visit_count = visit_count + 1
+                    WHERE id = ?
+                    """,
+                    (user[0],)
+             )
+
+                conn_log.commit()
+
+            cur_log.execute(
+              """
+             SELECT visit_count
+                FROM users
+                WHERE id = ?
+                """,
+                (user[0],)
+            )
+
+            count = cur_log.fetchone()[0]
+
+            conn_log.close()
+
+            return f"""
+        <h1>{user[1]}</h1>
+        <p>ID: {user[0]}</p>
+        <p>Email: {user[2]}</p>
+        <p>Visit Count: {count}</p>
+        """
+
+    from datetime import datetime
+
+    global last_unknown_seen
+
+    current_time = datetime.now()
+
+    should_count_unknown = False
+
+    if last_unknown_seen is None:
+
+        should_count_unknown = True
+
+    else:
+
+        difference = (
+            current_time - last_unknown_seen
+        ).total_seconds()
+
+        if difference > COUNT_INTERVAL:
+            should_count_unknown = True
+
+    if should_count_unknown:
+
+        last_unknown_seen = current_time
+
+        conn = sqlite3.connect("database.db")
+        cur = conn.cursor()
+
+        cur.execute("""
+        UPDATE stats
+        SET unknown_count = unknown_count + 1
+        WHERE id = 1
+        """)
+
+        conn.commit()
+
+        cur.execute("""
+        SELECT unknown_count
+        FROM stats
+        WHERE id = 1
+        """)
+
+        unknown_count = cur.fetchone()[0]
+
+        conn.close()
+
+        return f"""
+    <h1>Unknown User</h1>
+    <p>Unknown Count: {unknown_count}</p>
+    """
+
+    return "Unknown User"
+
+@app.route('/debug-db')
+def debug_db():
+    conn = sqlite3.connect("database.db")
+    cur = conn.cursor()
+
+    # Check users table
+    cur.execute("SELECT id, name, email, visit_count FROM users")
+    users = cur.fetchall()
+
+    # Check stats table
+    cur.execute("SELECT * FROM stats")
+    stats = cur.fetchall()
+
+    conn.close()
+
+    return f"""
+    <h2>Users Table</h2>
+    <pre>{users}</pre>
+    <h2>Stats Table</h2>
+    <pre>{stats}</pre>
+    """
+
+
+@app.route('/dashboard')
+def dashboard():
+    conn = sqlite3.connect("database.db")
+    cur = conn.cursor()
+
+    # Registered users
+    cur.execute("SELECT name, visit_count FROM users")
+    users = cur.fetchall()
+
+    # Totals
+    cur.execute("SELECT COUNT(*) FROM users")
+    total_users = cur.fetchone()[0]
+
+    cur.execute("SELECT SUM(visit_count) FROM users")
+    total_visits = cur.fetchone()[0] or 0
+
+    cur.execute("SELECT unknown_count FROM stats WHERE id = 1")
+    unknown_count = cur.fetchone()[0]
+
+    # Highest visit count
+    cur.execute("SELECT MAX(visit_count) FROM users")
+    max_visits = cur.fetchone()[0] or 0
+
+    # Recent activity logs (last 10 entries)
+    cur.execute("""
+        SELECT user_name, status, visit_time
+        FROM visitor_logs
+        ORDER BY id DESC
+        LIMIT 10
+    """)
+    logs = cur.fetchall()
+
+    conn.close()
+
+    return render_template(
+        "dashboard.html",
+        users=users,
+        logs=logs,
+        total_users=total_users,
+        total_visits=total_visits,
+        unknown_count=unknown_count,
+        max_visits=max_visits
+    )
+
+
+
+
+
+def gen_frames():
+    global camera
+
+    while True:
+
+        # camera released while registering
+        if camera is None:
+            continue
+
+        success, frame = camera.read()
+
+        if not success:
+            break
+
+        # Convert frame to RGB
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        face_locations = face_recognition.face_locations(rgb_frame)
+        face_encodings = face_recognition.face_encodings(
+            rgb_frame,
+            face_locations
+        )
+
+        # Load known users
+        conn = sqlite3.connect("database.db")
+        cur = conn.cursor()
+
+        cur.execute(
+            "SELECT id, name, face_encoding FROM users"
+        )
+
+        users = cur.fetchall()
+
+        conn.close()
+
+        known_encodings = [
+            np.array(json.loads(u[2]))
+            for u in users
+        ]
+
+        known_names = [u[1] for u in users]
+        known_ids = [u[0] for u in users]
+
+        for (top, right, bottom, left), face_encoding in zip(
+            face_locations,
+            face_encodings
+        ):
+
+            name = "Unknown"
+            color = (0, 0, 255)
+
+            if len(known_encodings) > 0:
+
+                matches = face_recognition.compare_faces(
+                    known_encodings,
+                    face_encoding
+                )
+
+                face_distances = face_recognition.face_distance(
+                    known_encodings,
+                    face_encoding
+                )
+
+                best_match_index = np.argmin(face_distances)
+
+                if matches[best_match_index]:
+
+                    name = known_names[best_match_index]
+                    color = (0, 255, 0)
+
+                    conn_log = sqlite3.connect("database.db")
+                    cur_log = conn_log.cursor()
+
+                    cur_log.execute(
+                        """
+                        UPDATE users
+                        SET visit_count = visit_count + 1
+                        WHERE id = ?
+                        """,
+                        (known_ids[best_match_index],)
+                    )
+
+                    cur_log.execute(
+                        """
+                        INSERT INTO visitor_logs(user_name,status)
+                        VALUES(?,?)
+                        """,
+                        (name, "KNOWN")
+                    )
+
+                    conn_log.commit()
+                    conn_log.close()
+
+                else:
+
+                    conn_log = sqlite3.connect("database.db")
+                    cur_log = conn_log.cursor()
+
+                    cur_log.execute(
+                        """
+                        UPDATE stats
+                        SET unknown_count = unknown_count + 1
+                        WHERE id = 1
+                        """
+                    )
+
+                    cur_log.execute(
+                        """
+                        INSERT INTO visitor_logs(user_name,status)
+                        VALUES(?,?)
+                        """,
+                        ("Unknown", "UNKNOWN")
+                    )
+
+                    conn_log.commit()
+                    conn_log.close()
+
+            cv2.rectangle(
+                frame,
+                (left, top),
+                (right, bottom),
+                color,
+                2
+            )
+
+            cv2.putText(
+                frame,
+                name,
+                (left, top - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                color,
+                2
+            )
+
+        ret, buffer = cv2.imencode('.jpg', frame)
+
+        frame = buffer.tobytes()
+
+        yield (
+            b'--frame\r\n'
+            b'Content-Type: image/jpeg\r\n\r\n'
+            + frame +
+            b'\r\n'
+        )
+        
+
+@app.route('/video_feed')
+def video_feed():
+    return Response(gen_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+
+
+@app.route('/pause-camera')
+def pause_camera():
+    global camera
+
+    if camera is not None:
+        camera.release()
+
+    return "paused"
+
+
+@app.route('/resume-camera')
+def resume_camera():
+    global camera
+
+    camera = cv2.VideoCapture(0)
+
+    return "resumed"
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)
+
+
