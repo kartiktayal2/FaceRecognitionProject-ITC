@@ -6,7 +6,10 @@ import face_recognition
 import numpy as np
 import json 
 from flask import Flask, render_template, request, Response
+from datetime import datetime, timedelta
 last_seen = {}
+last_yellow_seen = {}
+last_red_seen = {}
 COUNT_INTERVAL = 10
 last_unknown_seen = None
 camera = cv2.VideoCapture(0)
@@ -270,6 +273,62 @@ def scan_camera():
 
     global last_unknown_seen
 
+
+
+
+
+
+
+
+    # CHECK PREVIOUSLY SEEN UNKNOWN USERS
+
+    conn_unknown = sqlite3.connect("database.db")
+    cur_unknown = conn_unknown.cursor()
+
+    cur_unknown.execute("""
+    SELECT id, face_encoding, visit_count
+    FROM unknown_faces
+    """)
+
+    unknown_faces = cur_unknown.fetchall()
+
+    for unknown_user in unknown_faces:
+
+        stored_unknown_encoding = np.array(
+            json.loads(unknown_user[1])
+        )
+
+        distance = face_recognition.face_distance(
+            [stored_unknown_encoding],
+            uploaded_encoding
+        )[0]
+
+        if distance < 0.60:
+
+            cur_unknown.execute("""
+            UPDATE unknown_faces
+            SET visit_count = visit_count + 1,
+                last_seen = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (unknown_user[0],)
+            )
+
+            conn_unknown.commit()
+
+            count = unknown_user[2] + 1
+
+            conn_unknown.close()
+
+            return f"""
+            <h1 style='color:orange'>
+            Previously Seen Unknown User
+            </h1>
+
+            <p>Visit Count: {count}</p>
+            """
+
+    conn_unknown.close()
     current_time = datetime.now()
 
     should_count_unknown = False
@@ -289,35 +348,59 @@ def scan_camera():
 
     if should_count_unknown:
 
+        conn_unknown_new = sqlite3.connect("database.db")
+        cur_unknown_new = conn_unknown_new.cursor()
+
+        cur_unknown_new.execute(
+        """
+        INSERT INTO unknown_faces(face_encoding)
+        VALUES(?)
+        """,
+        (
+            json.dumps(
+                uploaded_encoding.tolist()
+            ),
+        ))
+
+        conn_unknown_new.commit()
+        conn_unknown_new.close()
+
         last_unknown_seen = current_time
 
         conn = sqlite3.connect("database.db")
         cur = conn.cursor()
 
-        cur.execute("""
+        cur.execute(
+        """
         UPDATE stats
         SET unknown_count = unknown_count + 1
         WHERE id = 1
-        """)
+        """
+        )
 
         conn.commit()
 
-        cur.execute("""
+        cur.execute(
+        """
         SELECT unknown_count
         FROM stats
         WHERE id = 1
-        """)
+        """
+        )
 
         unknown_count = cur.fetchone()[0]
 
         conn.close()
 
         return f"""
-    <h1>Unknown User</h1>
-    <p>Unknown Count: {unknown_count}</p>
-    """
+        <h1 style='color:red'>
+        New Unknown User
+        </h1>
 
+        <p>Unknown Count: {unknown_count}</p>
+        """
     return "Unknown User"
+
 
 @app.route('/debug-db')
 def debug_db():
@@ -454,8 +537,10 @@ def gen_frames():
                 )
 
                 best_match_index = np.argmin(face_distances)
+                print("Matched:", known_names[best_match_index])
+                print("Distance:", face_distances[best_match_index])
 
-                if matches[best_match_index]:
+                if face_distances[best_match_index] < 0.45:
 
                     name = known_names[best_match_index]
                     color = (0, 255, 0)
@@ -463,49 +548,81 @@ def gen_frames():
                     conn_log = sqlite3.connect("database.db")
                     cur_log = conn_log.cursor()
 
-                    cur_log.execute(
-                        """
-                        UPDATE users
-                        SET visit_count = visit_count + 1
-                        WHERE id = ?
-                        """,
-                        (known_ids[best_match_index],)
-                    )
+                    # cur_log.execute(
+                    #     """
+                    #     UPDATE users
+                    #     SET visit_count = visit_count + 1
+                    #     WHERE id = ?
+                    #     """,
+                    #     (known_ids[best_match_index],)
+                    # )
 
-                    cur_log.execute(
-                        """
-                        INSERT INTO visitor_logs(user_name,status)
-                        VALUES(?,?)
-                        """,
-                        (name, "KNOWN")
-                    )
+                    # cur_log.execute(
+                    #     """
+                    #     INSERT INTO visitor_logs(user_name,status)
+                    #     VALUES(?,?)
+                    #     """,
+                    #     (name, "KNOWN")
+                    # )
 
                     conn_log.commit()
                     conn_log.close()
 
                 else:
 
-                    conn_log = sqlite3.connect("database.db")
-                    cur_log = conn_log.cursor()
+                    conn_unknown = sqlite3.connect("database.db")
+                    cur_unknown = conn_unknown.cursor()
 
-                    cur_log.execute(
-                        """
-                        UPDATE stats
-                        SET unknown_count = unknown_count + 1
-                        WHERE id = 1
-                        """
-                    )
+                    cur_unknown.execute("""
+                        SELECT id, face_encoding
+                        FROM unknown_faces
+                    """)
 
-                    cur_log.execute(
-                        """
-                        INSERT INTO visitor_logs(user_name,status)
-                        VALUES(?,?)
-                        """,
-                        ("Unknown", "UNKNOWN")
-                    )
+                    unknown_faces = cur_unknown.fetchall()
 
-                    conn_log.commit()
-                    conn_log.close()
+                    found_unknown = False
+
+                    for unknown_user in unknown_faces:
+
+                        stored_encoding = np.array(
+                            json.loads(unknown_user[1])
+                        )
+
+                        distance = face_recognition.face_distance(
+                        [stored_encoding],
+                        face_encoding
+                        )[0]
+
+                        if distance < 0.45:
+                            print("YELLOW MATCH FOUND")
+
+                            name = "YELLOW TEST"
+                            color = (0, 215, 255)   #yellow
+
+                            found_unknown = True
+                            break
+
+                    conn_unknown.close()
+
+                    if not found_unknown:
+
+                        name = "New Unknown"
+                        color = (0, 0, 255)   # Red
+                        conn_unknown_new = sqlite3.connect("database.db")
+                        cur_unknown_new = conn_unknown_new.cursor()
+
+                        cur_unknown_new.execute("""
+                            INSERT INTO unknown_faces(face_encoding)
+                            VALUES(?)
+                                """,
+                        (
+                        json.dumps(
+                            face_encoding.tolist()
+                        ),
+                        ))
+
+                        conn_unknown_new.commit()
+                        conn_unknown_new.close()
 
             cv2.rectangle(
                 frame,
@@ -535,7 +652,7 @@ def gen_frames():
             + frame +
             b'\r\n'
         )
-        
+
 
 @app.route('/video_feed')
 def video_feed():
@@ -562,7 +679,37 @@ def resume_camera():
     return "resumed"
 
 
+
+
+def delete_old_logs():
+
+    conn = sqlite3.connect("database.db")
+    cur = conn.cursor()
+
+    cutoff_date = (
+        datetime.now() - timedelta(days=3)
+    ).strftime("%Y-%m-%d %H:%M:%S")
+
+    print("Deleting logs before:", cutoff_date)
+
+    cur.execute("""
+    DELETE FROM visitor_logs
+    WHERE visit_time < ?
+    """, (cutoff_date,))
+
+    print("Deleted Rows:", cur.rowcount)
+
+    conn.commit()
+    conn.close()
+
+
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
 
+    delete_old_logs()
 
+    app.run(
+        host="0.0.0.0",
+        port=5000,
+        debug=True
+    )

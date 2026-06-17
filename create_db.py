@@ -37,25 +37,55 @@
 # conn.close()
 
 
+# import sqlite3
+
+# conn = sqlite3.connect("database.db")
+# cur = conn.cursor()
+
+# cur.execute("""
+# CREATE TABLE IF NOT EXISTS stats(
+#     id INTEGER PRIMARY KEY,
+#     unknown_count INTEGER DEFAULT 0
+# )
+# """)
+
+# cur.execute("""
+# INSERT OR IGNORE INTO stats(id, unknown_count)
+# VALUES(1,0)
+# """)
+
+# conn.commit()
+# conn.close()
+
+# print("Stats table created")
+
+
+
+# import sqlite3
+
+# conn = sqlite3.connect("database.db")
+# cur = conn.cursor()
+
+# cur.execute("""
+# CREATE TABLE IF NOT EXISTS unknown_faces(
+#     id INTEGER PRIMARY KEY AUTOINCREMENT,
+#     face_encoding TEXT,
+#     visit_count INTEGER DEFAULT 1,
+#     last_seen DATETIME DEFAULT CURRENT_TIMESTAMP
+# )
+# """)
+
+# conn.commit()
+# conn.close()
+
+# print("unknown_faces table created")
+
 import sqlite3
 
 conn = sqlite3.connect("database.db")
 cur = conn.cursor()
 
-cur.execute("""
-CREATE TABLE IF NOT EXISTS stats(
-    id INTEGER PRIMARY KEY,
-    unknown_count INTEGER DEFAULT 0
-)
-""")
+cur.execute("SELECT COUNT(*) FROM unknown_faces")
+print(cur.fetchone())
 
-cur.execute("""
-INSERT OR IGNORE INTO stats(id, unknown_count)
-VALUES(1,0)
-""")
-
-conn.commit()
 conn.close()
-
-print("Stats table created")
-
