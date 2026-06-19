@@ -5,11 +5,14 @@ import sqlite3
 import face_recognition
 import numpy as np
 import json 
+import requests
+from sync_faces import sync_staff_faces
 from flask import Flask, render_template, request, Response
 from datetime import datetime, timedelta
 last_seen = {}
 last_yellow_seen = {}
 last_red_seen = {}
+attendance_marked = {}
 COUNT_INTERVAL = 10
 last_unknown_seen = None
 camera = cv2.VideoCapture(0)
@@ -501,7 +504,14 @@ def gen_frames():
         cur = conn.cursor()
 
         cur.execute(
-            "SELECT id, name, face_encoding FROM users"
+            """
+            SELECT
+            staff_id,
+            staff_code,
+            name,
+            face_encoding
+            FROM staff_faces
+            """
         )
 
         users = cur.fetchall()
@@ -509,11 +519,14 @@ def gen_frames():
         conn.close()
 
         known_encodings = [
-            np.array(json.loads(u[2]))
+            np.array(json.loads(u[3]))
             for u in users
         ]
 
-        known_names = [u[1] for u in users]
+        known_names = [u[2] for u in users]
+
+        known_staff_codes = [u[1] for u in users]
+
         known_ids = [u[0] for u in users]
 
         for (top, right, bottom, left), face_encoding in zip(
@@ -541,10 +554,48 @@ def gen_frames():
                 print("Distance:", face_distances[best_match_index])
 
                 if face_distances[best_match_index] < 0.45:
+                    print("GREEN MATCH FOUND")
 
-                    name = known_names[best_match_index]
+                    name = (
+                        f"{known_names[best_match_index]}"
+                        f" ({known_staff_codes[best_match_index]})"
+                    )
+
                     color = (0, 255, 0)
 
+                    staff_id = known_ids[best_match_index]
+
+                    current_time = datetime.now()
+
+                    should_mark = False
+
+                    if staff_id not in attendance_marked:
+
+                        should_mark = True
+
+                    else:
+
+                        seconds = (
+                            current_time -
+                            attendance_marked[staff_id]
+                        ).total_seconds()
+
+                        if seconds > 60:
+                            should_mark = True
+
+                    if should_mark:
+
+                        attendance_marked[staff_id] = current_time
+
+                        response = requests.post(
+                            "https://stafftally.com/api/face-attendance",
+                            json={
+                                "staff_id": staff_id,
+                                "device_name": "Face Recognition Camera 1"
+                            }
+                        )
+                        print("Attendance Response:")
+                        print(response.text)
                     conn_log = sqlite3.connect("database.db")
                     cur_log = conn_log.cursor()
 
@@ -708,8 +759,12 @@ if __name__ == "__main__":
 
     delete_old_logs()
 
+    print("Syncing Staff Faces...")
+    sync_staff_faces()
+
     app.run(
         host="0.0.0.0",
         port=5000,
         debug=True
     )
+
