@@ -16,6 +16,23 @@ def sync_staff_faces():
 
         print(f"\nProcessing: {staff['name']}")
 
+        conn = sqlite3.connect("database.db")
+        cur = conn.cursor()
+
+        cur.execute(
+            "SELECT staff_id FROM staff_faces WHERE staff_id = ?",
+            (staff["staff_id"],)
+        )
+
+        existing_staff = cur.fetchone()
+
+        conn.close()
+
+        if existing_staff:
+
+            print("ALREADY EXISTS - SKIPPED")
+            continue
+
         image_response = requests.get(
             staff["photo_url"],
             headers={

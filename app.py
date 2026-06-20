@@ -586,6 +586,8 @@ def gen_frames():
                     if should_mark:
 
                         attendance_marked[staff_id] = current_time
+                        print("Sending staff_id:", staff_id)
+                        print("Sending name:", known_names[best_match_index])
 
                         response = requests.post(
                             "https://stafftally.com/api/face-attendance",
@@ -594,6 +596,8 @@ def gen_frames():
                                 "device_name": "Face Recognition Camera 1"
                             }
                         )
+                        print("Status Code:", response.status_code)
+                        print("URL:", response.url)
                         print("Attendance Response:")
                         print(response.text)
                     conn_log = sqlite3.connect("database.db")
