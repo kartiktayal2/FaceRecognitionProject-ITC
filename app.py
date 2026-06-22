@@ -125,7 +125,12 @@ def dashboard_data():
     conn = sqlite3.connect("database.db")
     cur = conn.cursor()
 
-    cur.execute("SELECT name, visit_count FROM users")
+    cur.execute("""
+        SELECT name, visit_count
+        FROM users
+        ORDER BY visit_count DESC
+        LIMIT 5
+        """)
     users = cur.fetchall()
 
     cur.execute("SELECT COUNT(*) FROM users")
@@ -148,12 +153,45 @@ def dashboard_data():
     conn.close()
 
     return {
-        "users": users,
-        "logs": logs,
-        "total_users": total_users,
-        "total_visits": total_visits,
-        "unknown_count": unknown_count
-    }
+    "users": users,
+    "logs": logs,
+    "total_users": total_users,
+    "total_visits": total_visits,
+    "unknown_count": unknown_count,
+
+    "attendance": [
+        {
+            "day": "Monday",
+            "known": 42,
+            "unknown": 8
+        },
+        {
+            "day": "Tuesday",
+            "known": 45,
+            "unknown": 5
+        },
+        {
+            "day": "Wednesday",
+            "known": 40,
+            "unknown": 10
+        },
+        {
+            "day": "Thursday",
+            "known": 48,
+            "unknown": 2
+        },
+        {
+            "day": "Friday",
+            "known": 43,
+            "unknown": 7
+        },
+        {
+            "day": "Saturday",
+            "known": 38,
+            "unknown": 12
+        }
+    ]
+}
 
 
 @app.route('/scan-camera', methods=['POST'])
@@ -434,7 +472,12 @@ def dashboard():
     cur = conn.cursor()
 
     # Registered users
-    cur.execute("SELECT name, visit_count FROM users")
+    cur.execute("""
+        SELECT name, visit_count
+        FROM users
+        ORDER BY visit_count DESC
+        LIMIT 5
+        """)
     users = cur.fetchall()
 
     # Totals

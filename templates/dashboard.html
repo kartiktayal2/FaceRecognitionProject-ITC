@@ -5,36 +5,80 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Face Recognition Dashboard</title>
   <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 
 <body class="bg-gray-900 text-white min-h-screen">
 
   <div class="max-w-7xl mx-auto p-6">
+    <div class="flex justify-end gap-3 mb-6">
 
+        <button onclick="openRegisterModal()"
+            class="bg-blue-500 hover:bg-blue-600 px-4 py-2 rounded-lg">
+            Register User
+        </button>
 
+        <a href="/"
+           class="bg-yellow-500 hover:bg-yellow-600 text-black px-4 py-2 rounded-lg">
+            Home
+        </a>
 
-    <!-- Live Camera Feed -->
-    <div class="bg-gray-800 rounded-xl p-4 mb-6 text-center">
-      <img src="/video_feed" class="rounded-lg w-full border-2 border-gray-700">
     </div>
-
     <!-- Statistics (always one row) -->
-    <div class="grid grid-cols-3 gap-2 mb-6 text-center">
-      <div class="bg-gray-800 rounded-lg p-3">
-        <h2 class="text-yellow-400 text-xs font-semibold">TOTAL USER</h2>
-        <p class="text-lg md:text-2xl font-bold text-white mt-1" id="total_users">{{ total_users }}</p>
-      </div>
-      <div class="bg-gray-800 rounded-lg p-3">
-        <h2 class="text-red-500 text-xs font-semibold">UNKNOWN USER</h2>
-        <p class="text-lg md:text-2xl font-bold text-white mt-1" id="unknown_count">{{ unknown_count }}</p>
-      </div>
-      <div class="bg-gray-800 rounded-lg p-3">
-        <h2 class="text-green-500 text-xs font-semibold">KNOWN USER</h2>
-        <p class="text-lg md:text-2xl font-bold text-white mt-1" id="total_visits">{{ total_visits }}</p>
-      </div>
+    <!-- Analytics Cards -->
+<div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+
+  <div class="bg-gray-800 rounded-xl p-5 shadow-lg">
+    <h3 class="text-gray-400 text-sm">Total Users</h3>
+    <p class="text-3xl font-bold text-yellow-400" id="total_users">
+      {{ total_users }}
+    </p>
+  </div>
+
+  <div class="bg-gray-800 rounded-xl p-5 shadow-lg">
+    <h3 class="text-gray-400 text-sm">Known Users</h3>
+    <p class="text-3xl font-bold text-green-400" id="total_visits">
+      {{ total_visits }}
+    </p>
+  </div>
+
+  <div class="bg-gray-800 rounded-xl p-5 shadow-lg">
+    <h3 class="text-gray-400 text-sm">Unknown Users</h3>
+    <p class="text-3xl font-bold text-red-400" id="unknown_count">
+      {{ unknown_count }}
+    </p>
+  </div>
+
+  <div class="bg-gray-800 rounded-xl p-5 shadow-lg">
+    <h3 class="text-gray-400 text-sm">Highest Visits</h3>
+    <p class="text-3xl font-bold text-blue-400">
+      {{ max_visits }}
+    </p>
+  </div>
+
+</div>
+
+<div class="mb-6">
+
+    <div class="bg-gray-800 rounded-xl p-6">
+
+        <h2 class="text-yellow-400 font-bold text-xl mb-4">
+            Weekly Attendance Analytics
+        </h2>
+
+        <canvas id="attendanceChart"></canvas>
+
     </div>
 
+    <!-- Camera -->
+    
+
+</div>
+
+
+    <div class="grid md:grid-cols-2 gap-6 mb-6">
     <!-- Registered Users -->
+     
     <div class="bg-gray-800 rounded-xl shadow-lg overflow-hidden mb-6">
       <div class="bg-gray-700 p-4">
         <h2 class="text-yellow-400 font-bold text-lg md:text-xl">REGISTERED USERS</h2>
@@ -56,6 +100,7 @@
         </tbody>
       </table>
     </div>
+
 
     <!-- Recent Activity -->
     <div class="bg-gray-800 rounded-xl shadow-lg overflow-hidden mb-6">
@@ -87,14 +132,7 @@
         </tbody>
       </table>
     </div>
-
-    <!-- Register New User Button -->
-    <div class="text-center mt-6">
-      <button onclick="openRegisterModal()" class="bg-blue-500 hover:bg-blue-600 text-white px-5 py-2 rounded-lg font-semibold text-sm md:text-base">
-        Register New User
-      </button>
-    </div>
-
+  </div>
     <!-- Registration Modal -->
     <div id="registerModal" class="fixed inset-0 bg-black bg-opacity-50 hidden flex items-center justify-center">
       <div class="bg-gray-800 rounded-xl p-6 w-11/12 max-w-md">
@@ -113,17 +151,7 @@
       </div>
     </div>
 
-    <!-- Back Button -->
-    <div class="text-center mt-6">
-      <a href="/" class="bg-yellow-400 hover:bg-yellow-500 text-black px-5 py-2 rounded-lg font-semibold text-sm md:text-base">
-        Back To Home
-      </a>
-    </div>
-
-  </div>
   
-
-
     <!-- JavaScript: Voice + Dashboard Refresh + Registration -->
   <script>
     let lastSpoken = "";
@@ -254,5 +282,66 @@ function closeRegisterModal() {
       });
     });
   </script>
+  <script>
+fetch("/dashboard-data")
+.then(response => response.json())
+.then(data => {
+
+    const attendance = data.attendance;
+
+    const labels = attendance.map(item => item.day);
+
+    const knownData = attendance.map(item => item.known);
+
+    const unknownData = attendance.map(item => item.unknown);
+
+    const ctx = document.getElementById('attendanceChart');
+
+    new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: labels,
+            datasets: [
+                {
+                    label: 'Present',
+                    data: knownData,
+                    backgroundColor: '#22c55e'
+                },
+                {
+                    label: 'Absent',
+                    data: unknownData,
+                    backgroundColor: '#ef4444'
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            plugins: {
+                legend: {
+                    labels: {
+                        color: 'white'
+                    }
+                }
+            },
+            scales: {
+                x: {
+                    ticks: {
+                        color: 'white'
+                    }
+                },
+                y: {
+                    beginAtZero: true,
+                    ticks: {
+                        color: 'white'
+                    }
+                }
+            }
+        }
+    });
+
+});
+</script>
+<!-- Hidden Face Recognition Stream -->
+<img src="/video_feed" style="display:none;">
 </body>
 </html>
