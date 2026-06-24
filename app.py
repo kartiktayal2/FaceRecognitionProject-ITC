@@ -3,6 +3,8 @@ import cv2
 from flask import Flask, render_template, request
 import sqlite3
 import face_recognition
+import io
+from PIL import Image
 import numpy as np
 import json 
 import requests
@@ -10,12 +12,27 @@ from sync_faces import sync_staff_faces
 from flask import Flask, render_template, request, Response
 from datetime import datetime, timedelta
 last_seen = {}
+unknown_last_seen = {}
 last_yellow_seen = {}
 last_red_seen = {}
 attendance_marked = {}
+known_encodings = []
+known_names = []
+known_staff_codes = []
+known_ids = []
+unknown_encodings = []
+unknown_ids = []
 COUNT_INTERVAL = 10
 last_unknown_seen = None
 camera = cv2.VideoCapture(0)
+
+
+def refresh_face_cache():
+    load_staff_faces()
+    load_unknown_faces()
+
+def get_connection():
+    return sqlite3.connect("database.db")
 
 app = Flask(__name__)
 @app.route('/register-page')
@@ -40,10 +57,11 @@ def register_camera():
 
     image_bytes = base64.b64decode(image_data)
 
-    with open("temp.jpg", "wb") as f:
-        f.write(image_bytes)
-
-    image = face_recognition.load_image_file("temp.jpg")
+    image = np.array(
+        Image.open(
+            io.BytesIO(image_bytes)
+        )
+    )
 
     encodings = face_recognition.face_encodings(image)
 
@@ -52,7 +70,7 @@ def register_camera():
 
     encoding = encodings[0]
 
-    conn = sqlite3.connect("database.db")
+    conn = get_connection()
     cur = conn.cursor()
 
     cur.execute(
@@ -86,7 +104,7 @@ def scan():
 
     uploaded_encoding = encodings[0]
 
-    conn = sqlite3.connect("database.db")
+    conn = get_connection()
     cur = conn.cursor()
 
     cur.execute(
@@ -122,7 +140,7 @@ def scan():
 
 @app.route('/dashboard-data')
 def dashboard_data():
-    conn = sqlite3.connect("database.db")
+    conn = get_connection()
     cur = conn.cursor()
 
     cur.execute("""
@@ -203,10 +221,11 @@ def scan_camera():
 
     image_bytes = base64.b64decode(image_data)
 
-    with open("temp_scan.jpg", "wb") as f:
-        f.write(image_bytes)
-
-    image = face_recognition.load_image_file("temp_scan.jpg")
+    image = np.array(
+        Image.open(
+            io.BytesIO(image_bytes)
+        )
+    )
 
     encodings = face_recognition.face_encodings(image)
 
@@ -215,7 +234,7 @@ def scan_camera():
 
     uploaded_encoding = encodings[0]
 
-    conn = sqlite3.connect("database.db")
+    conn = get_connection()
     cur = conn.cursor()
 
     cur.execute(
@@ -242,7 +261,7 @@ def scan_camera():
         
         if distance < 0.60:
 
-            conn_log = sqlite3.connect("database.db")
+            conn_log = get_connection()
             cur_log = conn_log.cursor()
 
             from datetime import datetime
@@ -320,10 +339,9 @@ def scan_camera():
 
 
 
-
     # CHECK PREVIOUSLY SEEN UNKNOWN USERS
 
-    conn_unknown = sqlite3.connect("database.db")
+    conn_unknown = get_connection()
     cur_unknown = conn_unknown.cursor()
 
     cur_unknown.execute("""
@@ -389,7 +407,7 @@ def scan_camera():
 
     if should_count_unknown:
 
-        conn_unknown_new = sqlite3.connect("database.db")
+        conn_unknown_new = get_connection()
         cur_unknown_new = conn_unknown_new.cursor()
 
         cur_unknown_new.execute(
@@ -404,11 +422,12 @@ def scan_camera():
         ))
 
         conn_unknown_new.commit()
+        unknown_encodings.append(uploaded_encoding)
         conn_unknown_new.close()
 
         last_unknown_seen = current_time
 
-        conn = sqlite3.connect("database.db")
+        conn = get_connection()
         cur = conn.cursor()
 
         cur.execute(
@@ -445,7 +464,7 @@ def scan_camera():
 
 @app.route('/debug-db')
 def debug_db():
-    conn = sqlite3.connect("database.db")
+    conn = get_connection()
     cur = conn.cursor()
 
     # Check users table
@@ -468,7 +487,7 @@ def debug_db():
 
 @app.route('/dashboard')
 def dashboard():
-    conn = sqlite3.connect("database.db")
+    conn = get_connection()
     cur = conn.cursor()
 
     # Registered users
@@ -517,6 +536,75 @@ def dashboard():
 
 
 
+def load_staff_faces():
+
+    global known_encodings
+    global known_names
+    global known_staff_codes
+    global known_ids
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT
+            staff_id,
+            staff_code,
+            name,
+            face_encoding
+        FROM staff_faces
+    """)
+
+    users = cur.fetchall()
+
+    conn.close()
+
+    known_encodings = [
+        np.array(json.loads(u[3]))
+        for u in users
+    ]
+
+    known_names = [u[2] for u in users]
+
+    known_staff_codes = [u[1] for u in users]
+
+    known_ids = [u[0] for u in users]
+
+    print(f"Loaded {len(users)} staff faces into memory")
+
+
+def load_unknown_faces():
+
+    global unknown_encodings
+    global unknown_ids
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT id, face_encoding
+        FROM unknown_faces
+    """)
+
+    users = cur.fetchall()
+
+    conn.close()
+
+    unknown_ids = [u[0] for u in users]
+
+    unknown_encodings = [
+        np.array(json.loads(u[1]))
+        for u in users
+    ]
+
+    print(
+        f"Loaded {len(users)} unknown faces into memory"
+    )
+
+
+
+
+
 
 
 def gen_frames():
@@ -542,35 +630,6 @@ def gen_frames():
             face_locations
         )
 
-        # Load known users
-        conn = sqlite3.connect("database.db")
-        cur = conn.cursor()
-
-        cur.execute(
-            """
-            SELECT
-            staff_id,
-            staff_code,
-            name,
-            face_encoding
-            FROM staff_faces
-            """
-        )
-
-        users = cur.fetchall()
-
-        conn.close()
-
-        known_encodings = [
-            np.array(json.loads(u[3]))
-            for u in users
-        ]
-
-        known_names = [u[2] for u in users]
-
-        known_staff_codes = [u[1] for u in users]
-
-        known_ids = [u[0] for u in users]
 
         for (top, right, bottom, left), face_encoding in zip(
             face_locations,
@@ -581,11 +640,6 @@ def gen_frames():
             color = (0, 0, 255)
 
             if len(known_encodings) > 0:
-
-                matches = face_recognition.compare_faces(
-                    known_encodings,
-                    face_encoding
-                )
 
                 face_distances = face_recognition.face_distance(
                     known_encodings,
@@ -643,7 +697,7 @@ def gen_frames():
                         print("URL:", response.url)
                         print("Attendance Response:")
                         print(response.text)
-                    conn_log = sqlite3.connect("database.db")
+                    conn_log = get_connection()
                     cur_log = conn_log.cursor()
 
                     # cur_log.execute(
@@ -668,45 +722,30 @@ def gen_frames():
 
                 else:
 
-                    conn_unknown = sqlite3.connect("database.db")
-                    cur_unknown = conn_unknown.cursor()
-
-                    cur_unknown.execute("""
-                        SELECT id, face_encoding
-                        FROM unknown_faces
-                    """)
-
-                    unknown_faces = cur_unknown.fetchall()
-
                     found_unknown = False
 
-                    for unknown_user in unknown_faces:
-
-                        stored_encoding = np.array(
-                            json.loads(unknown_user[1])
-                        )
+                    for stored_encoding in unknown_encodings:
 
                         distance = face_recognition.face_distance(
-                        [stored_encoding],
-                        face_encoding
+                            [stored_encoding],
+                            face_encoding
                         )[0]
 
-                        if distance < 0.45:
+                        if distance < 0.50:
+
                             print("YELLOW MATCH FOUND")
 
                             name = "YELLOW TEST"
-                            color = (0, 215, 255)   #yellow
+                            color = (0, 215, 255)
 
                             found_unknown = True
                             break
-
-                    conn_unknown.close()
 
                     if not found_unknown:
 
                         name = "New Unknown"
                         color = (0, 0, 255)   # Red
-                        conn_unknown_new = sqlite3.connect("database.db")
+                        conn_unknown_new = get_connection()
                         cur_unknown_new = conn_unknown_new.cursor()
 
                         cur_unknown_new.execute("""
@@ -720,6 +759,7 @@ def gen_frames():
                         ))
 
                         conn_unknown_new.commit()
+                        unknown_encodings.append(face_encoding)
                         conn_unknown_new.close()
 
             cv2.rectangle(
@@ -781,7 +821,7 @@ def resume_camera():
 
 def delete_old_logs():
 
-    conn = sqlite3.connect("database.db")
+    conn = get_connection()
     cur = conn.cursor()
 
     cutoff_date = (
@@ -808,6 +848,12 @@ if __name__ == "__main__":
 
     print("Syncing Staff Faces...")
     sync_staff_faces()
+
+    refresh_face_cache()
+
+    load_staff_faces()
+
+    load_unknown_faces()
 
     app.run(
         host="0.0.0.0",
