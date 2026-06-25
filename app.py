@@ -145,16 +145,16 @@ def dashboard_data():
 
     cur.execute("""
         SELECT name, visit_count
-        FROM users
+        FROM staff_faces
         ORDER BY visit_count DESC
         LIMIT 5
         """)
     users = cur.fetchall()
 
-    cur.execute("SELECT COUNT(*) FROM users")
+    cur.execute("SELECT COUNT(*) FROM staff_faces")
     total_users = cur.fetchone()[0]
 
-    cur.execute("SELECT SUM(visit_count) FROM users")
+    cur.execute("SELECT SUM(visit_count) FROM staff_faces")
     total_visits = cur.fetchone()[0] or 0
 
     cur.execute("SELECT unknown_count FROM stats WHERE id = 1")
@@ -493,24 +493,24 @@ def dashboard():
     # Registered users
     cur.execute("""
         SELECT name, visit_count
-        FROM users
+        FROM staff_faces
         ORDER BY visit_count DESC
         LIMIT 5
         """)
     users = cur.fetchall()
 
     # Totals
-    cur.execute("SELECT COUNT(*) FROM users")
+    cur.execute("SELECT COUNT(*) FROM staff_faces")
     total_users = cur.fetchone()[0]
 
-    cur.execute("SELECT SUM(visit_count) FROM users")
+    cur.execute("SELECT SUM(visit_count) FROM staff_faces")
     total_visits = cur.fetchone()[0] or 0
 
     cur.execute("SELECT unknown_count FROM stats WHERE id = 1")
     unknown_count = cur.fetchone()[0]
 
     # Highest visit count
-    cur.execute("SELECT MAX(visit_count) FROM users")
+    cur.execute("SELECT MAX(visit_count) FROM staff_faces")
     max_visits = cur.fetchone()[0] or 0
 
     # Recent activity logs (last 10 entries)
@@ -697,46 +697,65 @@ def gen_frames():
                         print("URL:", response.url)
                         print("Attendance Response:")
                         print(response.text)
-                    conn_log = get_connection()
-                    cur_log = conn_log.cursor()
+                        conn_log = get_connection()
+                        cur_log = conn_log.cursor()
 
-                    # cur_log.execute(
-                    #     """
-                    #     UPDATE users
-                    #     SET visit_count = visit_count + 1
-                    #     WHERE id = ?
-                    #     """,
-                    #     (known_ids[best_match_index],)
-                    # )
+                        cur_log.execute(
+                            """
+                            UPDATE staff_faces
+                            SET visit_count = visit_count + 1
+                            WHERE staff_id = ?
+                            """,
+                            (known_ids[best_match_index],)
+                        )
+                        print("staff_id used for update:", known_ids[best_match_index])
+                        print("Rows updated:", cur_log.rowcount)
 
-                    # cur_log.execute(
-                    #     """
-                    #     INSERT INTO visitor_logs(user_name,status)
-                    #     VALUES(?,?)
-                    #     """,
-                    #     (name, "KNOWN")
-                    # )
+                        cur_log.execute(
+                            """
+                            INSERT INTO visitor_logs(user_name,status)
+                            VALUES(?,?)
+                            """,
+                            (name, "KNOWN")
+                        )
 
-                    conn_log.commit()
-                    conn_log.close()
+                        conn_log.commit()
+                        conn_log.close()
 
                 else:
 
                     found_unknown = False
 
-                    for stored_encoding in unknown_encodings:
+                    for i, stored_encoding in enumerate(unknown_encodings):
 
                         distance = face_recognition.face_distance(
                             [stored_encoding],
                             face_encoding
                         )[0]
 
-                        if distance < 0.50:
+                        if distance < 0.40:
 
-                            print("YELLOW MATCH FOUND")
+                            unknown_id = unknown_ids[i] if i < len(unknown_ids) else None
 
-                            name = "YELLOW TEST"
-                            color = (0, 215, 255)
+                            current_time = datetime.now()
+
+                            # check if 6 seconds have passed since first seen
+                            if unknown_id in last_yellow_seen:
+                                seconds = (current_time - last_yellow_seen[unknown_id]).total_seconds()
+                                if seconds < 6:
+                                    # still within 6 seconds, keep showing red
+                                    name = "New Unknown"
+                                    color = (0, 0, 255)
+                                else:
+                                    # 6 seconds passed, now show yellow
+                                    print("YELLOW MATCH FOUND")
+                                    name = "Unknown"
+                                    color = (0, 215, 255)
+                            else:
+                                # first time seeing this unknown, start timer
+                                last_yellow_seen[unknown_id] = current_time
+                                name = "New Unknown"
+                                color = (0, 0, 255)
 
                             found_unknown = True
                             break
@@ -744,23 +763,49 @@ def gen_frames():
                     if not found_unknown:
 
                         name = "New Unknown"
-                        color = (0, 0, 255)   # Red
-                        conn_unknown_new = get_connection()
-                        cur_unknown_new = conn_unknown_new.cursor()
+                        color = (0, 0, 255)
 
-                        cur_unknown_new.execute("""
-                            INSERT INTO unknown_faces(face_encoding)
-                            VALUES(?)
-                                """,
-                        (
-                        json.dumps(
-                            face_encoding.tolist()
-                        ),
-                        ))
+                        current_time = datetime.now()
 
-                        conn_unknown_new.commit()
-                        unknown_encodings.append(face_encoding)
-                        conn_unknown_new.close()
+                        # check face doesn't match any known staff
+                        staff_distances = face_recognition.face_distance(
+                            known_encodings,
+                            face_encoding
+                        )
+                        min_staff_distance = np.min(staff_distances) if len(known_encodings) > 0 else 1.0
+
+                        print("Min staff distance:", min_staff_distance)
+
+                        if min_staff_distance > 0.45:
+
+                            conn_unknown_new = get_connection()
+                            cur_unknown_new = conn_unknown_new.cursor()
+
+                            cur_unknown_new.execute("""
+                                INSERT INTO unknown_faces(face_encoding)
+                                VALUES(?)
+                            """,
+                            (json.dumps(face_encoding.tolist()),))
+
+                            cur_unknown_new.execute("""
+                                UPDATE stats
+                                SET unknown_count = unknown_count + 1
+                                WHERE id = 1
+                            """)
+
+                            conn_unknown_new.commit()
+
+                            new_id = cur_unknown_new.lastrowid
+                            unknown_encodings.append(face_encoding)
+                            unknown_ids.append(new_id)
+
+                            conn_unknown_new.close()
+
+                            print("New unknown inserted with id:", new_id)
+                            print("Unknown count updated in stats")
+
+                        else:
+                            print("Skipped — too close to a known staff face")
 
             cv2.rectangle(
                 frame,
@@ -850,10 +895,6 @@ if __name__ == "__main__":
     sync_staff_faces()
 
     refresh_face_cache()
-
-    load_staff_faces()
-
-    load_unknown_faces()
 
     app.run(
         host="0.0.0.0",
