@@ -80,12 +80,25 @@
 
 # print("unknown_faces table created")
 
+# import sqlite3
+
+# conn = sqlite3.connect("database.db")
+# cur = conn.cursor()
+
+# cur.execute("SELECT COUNT(*) FROM unknown_faces")
+# print(cur.fetchone())
+
+# conn.close()
+
+
+
 import sqlite3
 
 conn = sqlite3.connect("database.db")
-cur = conn.cursor()
 
-cur.execute("SELECT COUNT(*) FROM unknown_faces")
-print(cur.fetchone())
+conn.execute("ALTER TABLE staff_faces ADD COLUMN visit_count INTEGER DEFAULT 0")
 
+conn.commit()
 conn.close()
+
+print("Done! Column added successfully.")
