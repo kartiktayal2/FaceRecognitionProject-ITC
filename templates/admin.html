@@ -1,0 +1,1951 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<!--
+  ITC Customer Analytics — Admin Panel  (templates/admin.html)
+  ============================================================
+  A modular single-page admin panel. Each module is fully self-contained:
+  its data load, render, and event handlers live in its own JS object.
+
+  To add a new module in the future:
+    1. Add a <li> to the sidebar nav
+    2. Add a <section id="panel-xxx"> below
+    3. Add a MODULE_xxx object to the JS MODULES registry
+    4. Call router.register('xxx', MODULE_xxx)
+
+  Consumes:
+    GET  /api/admin/customers              POST/DELETE /api/admin/customers/<id>
+    GET  /api/admin/unknown-customers             DELETE /api/admin/unknown-customers[/<id>]
+    GET  /api/admin/visit-logs            DELETE /api/admin/visit-logs/delete-old
+    GET  /api/admin/database-overview
+    POST /api/admin/cache/refresh
+    GET/POST /api/settings
+    POST /api/admin/settings/reset-defaults
+    GET  /api/admin/system-info
+-->
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Admin Panel — ITC Analytics</title>
+
+  <!-- ── Google Fonts ──────────────────────────────────────── -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap"
+    rel="stylesheet"
+  />
+
+  <!-- ── Tailwind (browser build) ───────────────────────────── -->
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+
+  <!-- ================================================================
+       DESIGN TOKENS  (same palette as dashboard + settings)
+       ================================================================ -->
+  <style>
+    /* ── Palette ──────────────────────────────────────────────── */
+    :root {
+      --bg-base:       #0D1117;
+      --bg-surface:    #161B22;
+      --bg-elevated:   #21262D;
+      --border:        #30363D;
+      --border-subtle: #21262D;
+
+      --accent:        #00D4AA;   /* teal — primary action    */
+      --accent-amber:  #F0B429;   /* warning / unknown        */
+      --accent-red:    #EF4444;   /* danger / delete          */
+      --accent-green:  #22C55E;   /* success / known          */
+      --accent-blue:   #3B82F6;   /* info / neutral action    */
+
+      --text-1:        #E6EDF3;   /* headings                 */
+      --text-2:        #8B949E;   /* muted labels             */
+      --text-3:        #4D555E;   /* very muted               */
+
+      --font-ui:       'Inter', system-ui, sans-serif;
+      --font-mono:     'JetBrains Mono', monospace;
+
+      --sidebar-w:     230px;
+      --topbar-h:      52px;
+      --radius:        8px;
+
+      --ease:          cubic-bezier(.4,0,.2,1);
+      --dur:           200ms;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+    body {
+      font-family: var(--font-ui);
+      background: var(--bg-base);
+      color: var(--text-1);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+    /* ── Layout skeleton ──────────────────────────────────────── */
+    .admin-layout {
+      display: flex;
+      flex: 1;
+    }
+
+    /* ── TOPBAR ───────────────────────────────────────────────── */
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 200;
+      height: var(--topbar-h);
+      background: var(--bg-surface);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      padding: 0 1.25rem;
+      gap: 1rem;
+      flex-shrink: 0;
+    }
+
+    .topbar-brand {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      text-decoration: none;
+      flex-shrink: 0;
+    }
+
+    .topbar-icon {
+      width: 28px;
+      height: 28px;
+      background: var(--accent);
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .topbar-icon svg { width: 15px; height: 15px; }
+
+    .topbar-name {
+      font-size: 0.875rem;
+      font-weight: 700;
+      color: var(--text-1);
+    }
+
+    .topbar-name span { color: var(--accent); }
+
+    .topbar-divider {
+      width: 1px;
+      height: 24px;
+      background: var(--border);
+      flex-shrink: 0;
+    }
+
+    .topbar-crumb {
+      font-size: 0.8125rem;
+      color: var(--text-2);
+    }
+
+    .topbar-crumb strong {
+      color: var(--text-1);
+      font-weight: 600;
+    }
+
+    .topbar-spacer { flex: 1; }
+
+    .topbar-actions {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    /* ── SIDEBAR ──────────────────────────────────────────────── */
+    .sidebar {
+      width: var(--sidebar-w);
+      background: var(--bg-surface);
+      border-right: 1px solid var(--border);
+      flex-shrink: 0;
+      display: flex;
+      flex-direction: column;
+      position: sticky;
+      top: var(--topbar-h);
+      height: calc(100vh - var(--topbar-h));
+      overflow-y: auto;
+    }
+
+    .sidebar-section {
+      padding: 1rem 0.75rem 0.25rem;
+    }
+
+    .sidebar-section-label {
+      font-size: 0.625rem;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--text-3);
+      padding: 0 0.5rem;
+      margin-bottom: 0.25rem;
+    }
+
+    .sidebar-item {
+      display: flex;
+      align-items: center;
+      gap: 0.625rem;
+      padding: 0.5rem 0.625rem;
+      border-radius: 6px;
+      font-size: 0.8125rem;
+      font-weight: 500;
+      color: var(--text-2);
+      cursor: pointer;
+      border: none;
+      background: none;
+      width: 100%;
+      text-align: left;
+      text-decoration: none;
+      transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+      user-select: none;
+    }
+
+    .sidebar-item svg {
+      width: 15px;
+      height: 15px;
+      flex-shrink: 0;
+      opacity: 0.7;
+      transition: opacity var(--dur) var(--ease);
+    }
+
+    .sidebar-item:hover {
+      background: var(--bg-elevated);
+      color: var(--text-1);
+    }
+
+    .sidebar-item:hover svg { opacity: 1; }
+
+    .sidebar-item.active {
+      background: color-mix(in srgb, var(--accent) 12%, transparent);
+      color: var(--accent);
+    }
+
+    .sidebar-item.active svg { opacity: 1; stroke: var(--accent); }
+
+    .sidebar-item-danger:hover { background: rgba(239,68,68,.1); color: var(--accent-red); }
+
+    .sidebar-spacer { flex: 1; }
+
+    .sidebar-footer {
+      padding: 0.75rem;
+      border-top: 1px solid var(--border);
+    }
+
+    /* ── MAIN CONTENT AREA ────────────────────────────────────── */
+    .main-content {
+      flex: 1;
+      overflow-x: hidden;
+      min-width: 0;
+    }
+
+    .panel {
+      display: none;
+      padding: 1.5rem;
+      animation: fadeIn 0.18s var(--ease);
+    }
+
+    .panel.active { display: block; }
+
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+    /* ── Panel header ─────────────────────────────────────────── */
+    .panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+      flex-wrap: wrap;
+    }
+
+    .panel-title {
+      font-size: 1.0625rem;
+      font-weight: 700;
+      color: var(--text-1);
+    }
+
+    .panel-subtitle {
+      font-size: 0.75rem;
+      color: var(--text-2);
+      margin-top: 0.125rem;
+    }
+
+    .panel-actions {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+
+    /* ── Cards ────────────────────────────────────────────────── */
+    .card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+
+    .card-header {
+      padding: 0.75rem 1rem;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--bg-elevated);
+    }
+
+    .card-title {
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-1);
+    }
+
+    .card-body { padding: 1rem; }
+
+    /* ── Stat row (for overview cards) ───────────────────────── */
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+      gap: 0.75rem;
+      margin-bottom: 1.25rem;
+    }
+
+    .stat-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1rem;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .stat-card::before {
+      content: '';
+      position: absolute;
+      left: 0; top: 0; bottom: 0;
+      width: 3px;
+      border-radius: var(--radius) 0 0 var(--radius);
+      background: var(--stat-color, var(--accent));
+    }
+
+    .stat-value {
+      font-family: var(--font-mono);
+      font-size: 1.5rem;
+      font-weight: 600;
+      color: var(--stat-color, var(--accent));
+      line-height: 1;
+    }
+
+    .stat-label {
+      font-size: 0.6875rem;
+      color: var(--text-2);
+      margin-top: 0.25rem;
+    }
+
+    /* ── Buttons ──────────────────────────────────────────────── */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.375rem;
+      padding: 0.375rem 0.75rem;
+      border-radius: 6px;
+      font-size: 0.8125rem;
+      font-weight: 600;
+      font-family: var(--font-ui);
+      cursor: pointer;
+      border: 1px solid transparent;
+      transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease), opacity var(--dur) var(--ease);
+      text-decoration: none;
+      white-space: nowrap;
+      line-height: 1;
+    }
+
+    .btn svg { width: 13px; height: 13px; flex-shrink: 0; }
+
+    .btn-primary   { background: var(--accent);       color: #0D1117; border-color: var(--accent); }
+    .btn-primary:hover { background: #00bfa0; border-color: #00bfa0; }
+    .btn-secondary { background: transparent; color: var(--text-2); border-color: var(--border); }
+    .btn-secondary:hover { background: var(--bg-elevated); color: var(--text-1); }
+    .btn-danger    { background: rgba(239,68,68,.1); color: var(--accent-red); border-color: rgba(239,68,68,.3); }
+    .btn-danger:hover { background: rgba(239,68,68,.2); }
+    .btn-info      { background: rgba(59,130,246,.1); color: var(--accent-blue); border-color: rgba(59,130,246,.3); }
+    .btn-info:hover { background: rgba(59,130,246,.2); }
+    .btn:disabled  { opacity: 0.4; cursor: not-allowed; }
+
+    /* small variant */
+    .btn-sm { padding: 0.25rem 0.5rem; font-size: 0.75rem; }
+    .btn-sm svg { width: 11px; height: 11px; }
+
+    /* ── Search / filter bar ──────────────────────────────────── */
+    .filter-bar {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      margin-bottom: 0.875rem;
+      align-items: center;
+    }
+
+    .search-input, .select-input, .date-input {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.375rem 0.625rem;
+      font-size: 0.8125rem;
+      font-family: var(--font-ui);
+      color: var(--text-1);
+      outline: none;
+      transition: border-color var(--dur) var(--ease);
+    }
+
+    .search-input { min-width: 200px; flex: 1; max-width: 320px; }
+    .search-input:focus, .select-input:focus, .date-input:focus { border-color: var(--accent); }
+    .select-input option { background: var(--bg-elevated); }
+
+    /* ── Data Table ───────────────────────────────────────────── */
+    .table-wrapper {
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+
+    .data-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.8125rem;
+    }
+
+    .data-table thead th {
+      background: var(--bg-elevated);
+      padding: 0.625rem 0.875rem;
+      text-align: left;
+      font-size: 0.6875rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: var(--text-2);
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .data-table thead th:hover { color: var(--text-1); }
+
+    .sort-icon { opacity: 0.4; display: inline; }
+    .sort-icon.active { opacity: 1; color: var(--accent); }
+
+    .data-table tbody tr {
+      border-bottom: 1px solid var(--border-subtle);
+      transition: background var(--dur) var(--ease);
+    }
+
+    .data-table tbody tr:last-child { border-bottom: none; }
+    .data-table tbody tr:hover { background: var(--bg-elevated); }
+
+    .data-table td {
+      padding: 0.625rem 0.875rem;
+      color: var(--text-1);
+      vertical-align: middle;
+    }
+
+    .data-table .mono {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      color: var(--text-2);
+    }
+
+    .empty-row td {
+      text-align: center;
+      padding: 2.5rem;
+      color: var(--text-2);
+      font-size: 0.8125rem;
+    }
+
+    /* ── Badges ───────────────────────────────────────────────── */
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      padding: 0.1875rem 0.4375rem;
+      border-radius: 4px;
+      font-size: 0.6875rem;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+    }
+
+    .badge-known      { background: rgba(34,197,94,.12);  color: var(--accent-green); border: 1px solid rgba(34,197,94,.25); }
+    .badge-unknown    { background: rgba(239,68,68,.12);  color: var(--accent-red);   border: 1px solid rgba(239,68,68,.25); }
+    .badge-returning  { background: rgba(240,180,41,.12); color: var(--accent-amber); border: 1px solid rgba(240,180,41,.25); }
+    .badge-neutral    { background: rgba(139,148,158,.1); color: var(--text-2);        border: 1px solid var(--border); }
+
+    /* ── Pagination ───────────────────────────────────────────── */
+    .pagination {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 0.75rem;
+      font-size: 0.75rem;
+      color: var(--text-2);
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+
+    .pagination-btns { display: flex; gap: 0.25rem; }
+
+    .page-btn {
+      width: 28px;
+      height: 28px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 4px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      font-size: 0.75rem;
+      cursor: pointer;
+      color: var(--text-2);
+      transition: background var(--dur) var(--ease);
+    }
+
+    .page-btn:hover:not(:disabled) { background: var(--border); color: var(--text-1); }
+    .page-btn.active { background: var(--accent); border-color: var(--accent); color: #0D1117; font-weight: 700; }
+    .page-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+
+    /* ── Form fields (for edit modal) ────────────────────────── */
+    .form-group { margin-bottom: 0.875rem; }
+
+    .form-label {
+      display: block;
+      font-size: 0.6875rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-2);
+      margin-bottom: 0.3rem;
+    }
+
+    .form-input {
+      width: 100%;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.5rem 0.75rem;
+      font-size: 0.875rem;
+      font-family: var(--font-ui);
+      color: var(--text-1);
+      outline: none;
+      transition: border-color var(--dur) var(--ease);
+    }
+
+    .form-input:focus { border-color: var(--accent); }
+    .form-input::placeholder { color: var(--text-3); }
+
+    /* ── Settings rows ────────────────────────────────────────── */
+    .setting-row {
+      display: grid;
+      grid-template-columns: 1fr 180px;
+      align-items: center;
+      gap: 1rem;
+      padding: 0.875rem 1rem;
+      border-bottom: 1px solid var(--border-subtle);
+      transition: background var(--dur) var(--ease);
+    }
+
+    .setting-row:last-child { border-bottom: none; }
+    .setting-row:hover { background: var(--bg-elevated); }
+
+    .setting-name { font-size: 0.8125rem; font-weight: 600; color: var(--text-1); }
+    .setting-desc { font-size: 0.6875rem; color: var(--text-2); margin-top: 0.125rem; }
+    .setting-hint { font-size: 0.625rem; color: var(--accent-amber); margin-top: 0.125rem; }
+
+    .input-group {
+      display: flex;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+      background: var(--bg-elevated);
+      transition: border-color var(--dur) var(--ease);
+    }
+
+    .input-group:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(0,212,170,.1); }
+
+    .setting-input {
+      flex: 1;
+      min-width: 0;
+      background: transparent;
+      border: none;
+      outline: none;
+      padding: 0.5rem 0.625rem;
+      font-size: 0.875rem;
+      font-family: var(--font-mono);
+      font-weight: 600;
+      color: var(--accent);
+    }
+
+    .setting-input::-webkit-inner-spin-button,
+    .setting-input::-webkit-outer-spin-button { -webkit-appearance: none; }
+    .setting-input[type=number] { -moz-appearance: textfield; }
+
+    .input-unit {
+      padding: 0 0.5rem;
+      font-size: 0.6875rem;
+      color: var(--text-2);
+      background: var(--bg-elevated);
+      border-left: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      white-space: nowrap;
+    }
+
+    /* ── System info grid ─────────────────────────────────────── */
+    .info-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+      gap: 0.75rem;
+    }
+
+    .info-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 0.875rem 1rem;
+    }
+
+    .info-card-label {
+      font-size: 0.6875rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: var(--text-2);
+      margin-bottom: 0.375rem;
+    }
+
+    .info-card-value {
+      font-family: var(--font-mono);
+      font-size: 0.8125rem;
+      color: var(--text-1);
+      word-break: break-all;
+    }
+
+    .status-dot {
+      display: inline-block;
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      margin-right: 0.375rem;
+      flex-shrink: 0;
+    }
+
+    .dot-green  { background: var(--accent-green); box-shadow: 0 0 0 2px rgba(34,197,94,.2); }
+    .dot-red    { background: var(--accent-red);   }
+    .dot-amber  { background: var(--accent-amber); }
+    .dot-blue   { background: var(--accent-blue);  }
+
+    /* ── MODAL ────────────────────────────────────────────────── */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,.72);
+      backdrop-filter: blur(4px);
+      z-index: 500;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 1rem;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity var(--dur) var(--ease);
+    }
+
+    .modal-backdrop.open { opacity: 1; pointer-events: auto; }
+
+    .modal {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      width: 100%;
+      max-width: 420px;
+      transform: translateY(10px);
+      transition: transform var(--dur) var(--ease);
+    }
+
+    .modal-backdrop.open .modal { transform: translateY(0); }
+
+    .modal-header {
+      padding: 1rem 1.125rem;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .modal-title { font-size: 0.9375rem; font-weight: 700; }
+
+    .modal-close {
+      background: none; border: none; cursor: pointer;
+      color: var(--text-2); padding: 0.25rem; border-radius: 4px;
+      transition: color var(--dur) var(--ease);
+    }
+
+    .modal-close:hover { color: var(--text-1); }
+    .modal-close svg { width: 16px; height: 16px; }
+
+    .modal-body { padding: 1.125rem; }
+
+    .modal-footer {
+      padding: 0.875rem 1.125rem;
+      border-top: 1px solid var(--border);
+      display: flex;
+      justify-content: flex-end;
+      gap: 0.5rem;
+    }
+
+    /* ── Toast ────────────────────────────────────────────────── */
+    .toast-container {
+      position: fixed;
+      bottom: 1.25rem;
+      right: 1.25rem;
+      z-index: 600;
+      display: flex;
+      flex-direction: column;
+      gap: 0.4rem;
+    }
+
+    .toast {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.625rem 0.875rem;
+      font-size: 0.8125rem;
+      color: var(--text-1);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      min-width: 220px;
+      max-width: 340px;
+      box-shadow: 0 8px 24px rgba(0,0,0,.4);
+      animation: toastIn .2s var(--ease) forwards;
+    }
+
+    .toast-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+    .toast-success .toast-dot { background: var(--accent-green); }
+    .toast-error   .toast-dot { background: var(--accent-red); }
+    .toast-info    .toast-dot { background: var(--accent-blue); }
+
+    @keyframes toastIn { from { opacity:0; transform:translateX(12px); } to { opacity:1; transform:none; } }
+
+    /* ── Spinner ──────────────────────────────────────────────── */
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spin { animation: spin .7s linear infinite; }
+
+    /* ── Loading state ────────────────────────────────────────── */
+    .loading-row td { text-align: center; padding: 2rem; color: var(--text-2); }
+
+    @media (max-width: 768px) {
+      .sidebar { display: none; }
+      .setting-row { grid-template-columns: 1fr; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration:.01ms!important; transition-duration:.01ms!important; }
+    }
+  </style>
+</head>
+
+<body>
+
+<!-- ════════════════════════════════════════════════════════════
+     TOPBAR
+     ════════════════════════════════════════════════════════════ -->
+<header class="topbar" role="banner">
+  <a class="topbar-brand" href="/">
+    <div class="topbar-icon" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#0D1117" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M9 3H5a2 2 0 00-2 2v4"/><path d="M21 3h-4m4 0v4"/>
+        <path d="M3 21v-4m0 4h4"/><path d="M21 21v-4m0 4h-4"/>
+        <circle cx="12" cy="12" r="3"/>
+      </svg>
+    </div>
+    <span class="topbar-name">ITC <span>Analytics</span></span>
+  </a>
+
+  <div class="topbar-divider" aria-hidden="true"></div>
+  <span class="topbar-crumb"><strong>Admin Panel</strong></span>
+
+  <div class="topbar-spacer"></div>
+
+  <div class="topbar-actions">
+    <a href="/dashboard" class="btn btn-secondary" aria-label="Back to dashboard">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
+        <rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>
+      </svg>
+      Dashboard
+    </a>
+  </div>
+</header>
+
+<!-- ════════════════════════════════════════════════════════════
+     BODY LAYOUT
+     ════════════════════════════════════════════════════════════ -->
+<div class="admin-layout">
+
+  <!-- ── SIDEBAR ──────────────────────────────────────────── -->
+  <aside class="sidebar" role="navigation" aria-label="Admin navigation">
+
+    <div class="sidebar-section">
+      <p class="sidebar-section-label">Overview</p>
+      <button class="sidebar-item active" data-panel="overview" onclick="router.go('overview')">
+        <!-- grid icon -->
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
+          <rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>
+        </svg>
+        Database Overview
+      </button>
+    </div>
+
+    <div class="sidebar-section">
+      <p class="sidebar-section-label">Recognition</p>
+      <button class="sidebar-item" data-panel="settings" onclick="router.go('settings')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>
+        </svg>
+        Recognition Settings
+      </button>
+    </div>
+
+    <div class="sidebar-section">
+      <p class="sidebar-section-label">Customers</p>
+      <button class="sidebar-item" data-panel="customers" onclick="router.go('customers')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/>
+          <path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/>
+        </svg>
+        Registered Customers
+      </button>
+      <button class="sidebar-item" data-panel="unknown" onclick="router.go('unknown')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3"/>
+          <line x1="12" y1="17" x2="12.01" y2="17"/>
+        </svg>
+        Unknown Customers
+      </button>
+    </div>
+
+    <div class="sidebar-section">
+      <p class="sidebar-section-label">Logs</p>
+      <button class="sidebar-item" data-panel="logs" onclick="router.go('logs')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+          <polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/>
+          <line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/>
+        </svg>
+        Visit Logs
+      </button>
+    </div>
+
+    <div class="sidebar-section">
+      <p class="sidebar-section-label">System</p>
+      <button class="sidebar-item" data-panel="sysinfo" onclick="router.go('sysinfo')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
+          <line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
+        </svg>
+        System Information
+      </button>
+    </div>
+
+    <div class="sidebar-spacer"></div>
+
+    <div class="sidebar-footer">
+      <a href="/dashboard" class="sidebar-item sidebar-item-danger">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4"/>
+          <polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/>
+        </svg>
+        Back to Dashboard
+      </a>
+    </div>
+
+  </aside>
+
+  <!-- ── MAIN PANELS ───────────────────────────────────────── -->
+  <main class="main-content" role="main" aria-label="Admin panel content">
+
+    <!-- ══════════════════════════════════════════════════════
+         PANEL: DATABASE OVERVIEW
+         ══════════════════════════════════════════════════════ -->
+    <section id="panel-overview" class="panel active">
+      <div class="panel-header">
+        <div>
+          <h1 class="panel-title">Database Overview</h1>
+          <p class="panel-subtitle">Live summary of tables, cache, and today's activity.</p>
+        </div>
+        <div class="panel-actions">
+          <button class="btn btn-secondary" onclick="MODULE_overview.load()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+              <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>
+              <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/>
+            </svg>
+            Refresh
+          </button>
+          <button class="btn btn-primary" onclick="MODULE_overview.refreshCache()">
+            Refresh Face Cache
+          </button>
+        </div>
+      </div>
+
+      <div class="stat-grid" id="overview-stats">
+        <!-- populated by JS -->
+      </div>
+
+      <!-- Quick actions -->
+      <div class="card" style="margin-top: 0.5rem;">
+        <div class="card-header"><span class="card-title">Quick Actions</span></div>
+        <div class="card-body" style="display:flex;gap:.625rem;flex-wrap:wrap;">
+          <button class="btn btn-secondary" onclick="MODULE_overview.refreshCache()">
+            Reload Face Cache
+          </button>
+          <button class="btn btn-secondary" onclick="router.go('settings'); MODULE_settings.loadAndReload()">
+            Reload System Settings
+          </button>
+          <button class="btn btn-info" onclick="router.go('customers')">
+            Manage Customers
+          </button>
+          <button class="btn btn-info" onclick="router.go('logs')">
+            View Visit Logs
+          </button>
+        </div>
+      </div>
+    </section>
+
+
+    <!-- ══════════════════════════════════════════════════════
+         PANEL: RECOGNITION SETTINGS
+         ══════════════════════════════════════════════════════ -->
+    <section id="panel-settings" class="panel">
+      <div class="panel-header">
+        <div>
+          <h1 class="panel-title">Recognition Settings</h1>
+          <p class="panel-subtitle">Changes apply immediately — no server restart required.</p>
+        </div>
+        <div class="panel-actions">
+          <button class="btn btn-secondary" id="btn-reset-defaults" onclick="MODULE_settings.resetDefaults()">
+            Reset to Defaults
+          </button>
+          <button class="btn btn-secondary" onclick="MODULE_settings.loadAndReload()">
+            Reload from DB
+          </button>
+          <button class="btn btn-primary" id="btn-save-settings" onclick="MODULE_settings.save()" disabled>
+            Save Changes
+          </button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Timing</span>
+          <span id="settings-status" style="font-size:.75rem;color:var(--text-2)">Loading…</span>
+        </div>
+
+        <!-- New face delay -->
+        <div class="setting-row">
+          <div>
+            <div class="setting-name">New Face Detection Delay</div>
+            <div class="setting-desc">Seconds a new face must remain visible before being saved as Unknown Customer.</div>
+          </div>
+          <div class="input-group">
+            <input class="setting-input" id="s-new_face_delay" type="number" min="1" max="30" step="0.5" />
+            <span class="input-unit">sec</span>
+          </div>
+        </div>
+
+        <!-- Cooldown -->
+        <div class="setting-row">
+          <div>
+            <div class="setting-name">Recognition Cooldown</div>
+            <div class="setting-desc">Minimum seconds between counting the same person twice.</div>
+          </div>
+          <div class="input-group">
+            <input class="setting-input" id="s-cooldown_seconds" type="number" min="1" max="300" step="1" />
+            <span class="input-unit">sec</span>
+          </div>
+        </div>
+
+        <!-- Pending expire -->
+        <div class="setting-row">
+          <div>
+            <div class="setting-name">Pending Face Timeout</div>
+            <div class="setting-desc">Discard a pending new-face timer after this many seconds if the face disappears.</div>
+          </div>
+          <div class="input-group">
+            <input class="setting-input" id="s-pending_expire_seconds" type="number" min="2" max="60" step="1" />
+            <span class="input-unit">sec</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:.75rem;">
+        <div class="card-header"><span class="card-title">Thresholds</span></div>
+
+        <!-- Known threshold -->
+        <div class="setting-row">
+          <div>
+            <div class="setting-name">Known Customer Threshold</div>
+            <div class="setting-desc">Max face distance to recognise a registered customer (green box).</div>
+            <div class="setting-hint">Recommended: 0.40 – 0.50</div>
+          </div>
+          <div class="input-group">
+            <input class="setting-input" id="s-known_threshold" type="number" min="0.1" max="0.9" step="0.01" />
+            <span class="input-unit">dist</span>
+          </div>
+        </div>
+
+        <!-- Unknown threshold -->
+        <div class="setting-row">
+          <div>
+            <div class="setting-name">Returning Unknown Threshold</div>
+            <div class="setting-desc">Max face distance to match a returning Unknown Customer (yellow box). Keep lower than known threshold.</div>
+            <div class="setting-hint">Recommended: 0.35 – 0.45</div>
+          </div>
+          <div class="input-group">
+            <input class="setting-input" id="s-unknown_threshold" type="number" min="0.1" max="0.9" step="0.01" />
+            <span class="input-unit">dist</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:.75rem;">
+        <div class="card-header"><span class="card-title">Dashboard &amp; Maintenance</span></div>
+
+        <!-- Dashboard refresh -->
+        <div class="setting-row">
+          <div>
+            <div class="setting-name">Dashboard Refresh Interval</div>
+            <div class="setting-desc">How often the dashboard polls /dashboard-data (seconds).</div>
+          </div>
+          <div class="input-group">
+            <input class="setting-input" id="s-dashboard_refresh_seconds" type="number" min="2" max="60" step="1" />
+            <span class="input-unit">sec</span>
+          </div>
+        </div>
+
+        <!-- Auto delete logs -->
+        <div class="setting-row">
+          <div>
+            <div class="setting-name">Visit Log Retention</div>
+            <div class="setting-desc">Logs older than this many days are auto-deleted at startup.</div>
+          </div>
+          <div class="input-group">
+            <input class="setting-input" id="s-auto_delete_logs_days" type="number" min="1" max="365" step="1" />
+            <span class="input-unit">days</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+
+    <!-- ══════════════════════════════════════════════════════
+         PANEL: REGISTERED CUSTOMERS
+         ══════════════════════════════════════════════════════ -->
+    <section id="panel-customers" class="panel">
+      <div class="panel-header">
+        <div>
+          <h1 class="panel-title">Registered Customers</h1>
+          <p class="panel-subtitle">Face-encoded customers recognised in real time.</p>
+        </div>
+      </div>
+
+      <div class="filter-bar">
+        <input class="search-input" type="text" placeholder="Search name, email, phone…" id="cust-search" oninput="MODULE_customers.onSearch()" />
+        <select class="select-input" id="cust-sort" onchange="MODULE_customers.load()">
+          <option value="name">Sort: Name</option>
+          <option value="visit_count">Sort: Visits</option>
+          <option value="last_seen">Sort: Last Seen</option>
+          <option value="id">Sort: ID</option>
+        </select>
+        <select class="select-input" id="cust-order" onchange="MODULE_customers.load()">
+          <option value="asc">↑ Ascending</option>
+          <option value="desc">↓ Descending</option>
+        </select>
+        <button class="btn btn-secondary" onclick="MODULE_customers.load()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+            <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>
+            <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/>
+          </svg>
+          Refresh
+        </button>
+      </div>
+
+      <div class="table-wrapper">
+        <table class="data-table" aria-label="Registered customers">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Name</th>
+              <th>Email</th>
+              <th>Phone</th>
+              <th>Visits</th>
+              <th>Created</th>
+              <th>Last Seen</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="customers-tbody">
+            <tr class="loading-row"><td colspan="8">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div id="customers-pagination" class="pagination"></div>
+    </section>
+
+
+    <!-- ══════════════════════════════════════════════════════
+         PANEL: UNKNOWN CUSTOMERS
+         ══════════════════════════════════════════════════════ -->
+    <section id="panel-unknown" class="panel">
+      <div class="panel-header">
+        <div>
+          <h1 class="panel-title">Unknown Customers</h1>
+          <p class="panel-subtitle">Faces detected but not yet registered. Delete refreshes the live recognition cache instantly.</p>
+        </div>
+        <div class="panel-actions">
+          <button class="btn btn-danger" onclick="MODULE_unknown.deleteAll()">
+            Delete All Unknown
+          </button>
+        </div>
+      </div>
+
+      <div class="filter-bar">
+        <input class="search-input" type="text" placeholder="Search by ID…" id="unk-search" oninput="MODULE_unknown.onSearch()" />
+        <select class="select-input" id="unk-sort" onchange="MODULE_unknown.load()">
+          <option value="id">Sort: ID</option>
+          <option value="visit_count">Sort: Visits</option>
+          <option value="last_seen">Sort: Last Seen</option>
+        </select>
+        <select class="select-input" id="unk-order" onchange="MODULE_unknown.load()">
+          <option value="desc">↓ Descending</option>
+          <option value="asc">↑ Ascending</option>
+        </select>
+        <button class="btn btn-secondary" onclick="MODULE_unknown.load()">Refresh</button>
+      </div>
+
+      <div class="table-wrapper">
+        <table class="data-table" aria-label="Unknown customers">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Visits</th>
+              <th>First Seen</th>
+              <th>Last Seen</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="unknown-tbody">
+            <tr class="loading-row"><td colspan="5">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div id="unknown-pagination" class="pagination"></div>
+    </section>
+
+
+    <!-- ══════════════════════════════════════════════════════
+         PANEL: VISIT LOGS
+         ══════════════════════════════════════════════════════ -->
+    <section id="panel-logs" class="panel">
+      <div class="panel-header">
+        <div>
+          <h1 class="panel-title">Visit Logs</h1>
+          <p class="panel-subtitle">Full history of recognition events. Newest first.</p>
+        </div>
+        <div class="panel-actions">
+          <!-- Extension point: CSV export button can be added here in the future -->
+          <button class="btn btn-danger" onclick="MODULE_logs.promptDeleteOld()">
+            Delete Old Logs…
+          </button>
+        </div>
+      </div>
+
+      <div class="filter-bar">
+        <input class="search-input" type="text" placeholder="Search name or ID…" id="log-search" oninput="MODULE_logs.onSearch()" />
+        <select class="select-input" id="log-type" onchange="MODULE_logs.load()">
+          <option value="">All types</option>
+          <option value="known">Known</option>
+          <option value="unknown">Unknown</option>
+          <option value="returning_unknown">Returning Unknown</option>
+        </select>
+        <input class="date-input" type="date" id="log-date-from" onchange="MODULE_logs.load()" title="From date" />
+        <input class="date-input" type="date" id="log-date-to"   onchange="MODULE_logs.load()" title="To date" />
+        <button class="btn btn-secondary" onclick="MODULE_logs.clearFilters()">Clear Filters</button>
+        <button class="btn btn-secondary" onclick="MODULE_logs.load()">Refresh</button>
+      </div>
+
+      <div class="table-wrapper">
+        <table class="data-table" aria-label="Visit logs">
+          <thead>
+            <tr>
+              <th>Log ID</th>
+              <th>Name</th>
+              <th>Type</th>
+              <th>Customer ID</th>
+              <th>Visit Time</th>
+            </tr>
+          </thead>
+          <tbody id="logs-tbody">
+            <tr class="loading-row"><td colspan="5">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div id="logs-pagination" class="pagination"></div>
+    </section>
+
+
+    <!-- ══════════════════════════════════════════════════════
+         PANEL: SYSTEM INFORMATION
+         ══════════════════════════════════════════════════════ -->
+    <section id="panel-sysinfo" class="panel">
+      <div class="panel-header">
+        <div>
+          <h1 class="panel-title">System Information</h1>
+          <p class="panel-subtitle">Runtime environment, library versions, and service statuses.</p>
+        </div>
+        <div class="panel-actions">
+          <button class="btn btn-secondary" onclick="MODULE_sysinfo.load()">Refresh</button>
+        </div>
+      </div>
+      <div class="info-grid" id="sysinfo-grid">
+        <!-- populated by JS -->
+      </div>
+    </section>
+
+  </main>
+</div>
+
+
+<!-- ════════════════════════════════════════════════════════════
+     MODALS
+     ════════════════════════════════════════════════════════════ -->
+
+<!-- Edit Customer Modal -->
+<div id="modal-edit-customer" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="modal-edit-title">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title" id="modal-edit-title">Edit Customer</span>
+      <button class="modal-close" onclick="closeModal('modal-edit-customer')" aria-label="Close">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="edit-customer-id" />
+      <div class="form-group">
+        <label class="form-label" for="edit-name">Full Name *</label>
+        <input class="form-input" type="text" id="edit-name" placeholder="Customer name" />
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="edit-email">Email</label>
+        <input class="form-input" type="email" id="edit-email" placeholder="customer@email.com" />
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="edit-phone">Phone</label>
+        <input class="form-input" type="tel" id="edit-phone" placeholder="+91 …" />
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal('modal-edit-customer')">Cancel</button>
+      <button class="btn btn-primary" onclick="MODULE_customers.submitEdit()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Confirm Delete Modal -->
+<div id="modal-confirm" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="modal-confirm-title">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title" id="modal-confirm-title">Confirm</span>
+      <button class="modal-close" onclick="closeModal('modal-confirm')" aria-label="Close">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <p id="modal-confirm-msg" style="font-size:.875rem;color:var(--text-2);line-height:1.6;"></p>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal('modal-confirm')">Cancel</button>
+      <button class="btn btn-danger" id="modal-confirm-ok">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<!-- Delete Old Logs Modal -->
+<div id="modal-delete-logs" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="modal-log-title">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title" id="modal-log-title">Delete Old Visit Logs</span>
+      <button class="modal-close" onclick="closeModal('modal-delete-logs')" aria-label="Close">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label" for="delete-logs-days">Delete logs older than (days)</label>
+        <input class="form-input" type="number" id="delete-logs-days" value="7" min="1" max="365" />
+      </div>
+      <p style="font-size:.75rem;color:var(--accent-red);margin-top:.5rem;">This operation is irreversible.</p>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal('modal-delete-logs')">Cancel</button>
+      <button class="btn btn-danger" onclick="MODULE_logs.confirmDeleteOld()">Delete Logs</button>
+    </div>
+  </div>
+</div>
+
+
+<!-- ════════════════════════════════════════════════════════════
+     TOAST CONTAINER
+     ════════════════════════════════════════════════════════════ -->
+<div class="toast-container" id="toastContainer" aria-live="polite" aria-atomic="false"></div>
+
+
+<!-- ════════════════════════════════════════════════════════════
+     JAVASCRIPT
+     ════════════════════════════════════════════════════════════ -->
+<script>
+/* ================================================================
+   UTILITIES
+   ================================================================ */
+
+/** XSS-safe HTML escaping */
+function esc(str) {
+  return String(str ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+/** Show a toast notification */
+function toast(msg, type = 'success') {
+  const c  = document.getElementById('toastContainer');
+  const el = document.createElement('div');
+  el.className = `toast toast-${type}`;
+  el.innerHTML = `<div class="toast-dot"></div><div style="flex:1">${esc(msg)}</div>`;
+  c.appendChild(el);
+  setTimeout(() => el.remove(), 3800);
+}
+
+/** Open a modal */
+function openModal(id) {
+  document.getElementById(id).classList.add('open');
+}
+
+/** Close a modal */
+function closeModal(id) {
+  document.getElementById(id).classList.remove('open');
+}
+
+/** Simple confirmation modal — returns a Promise resolved with true/false */
+function confirm(title, msg) {
+  return new Promise(resolve => {
+    document.getElementById('modal-confirm-title').textContent = title;
+    document.getElementById('modal-confirm-msg').textContent   = msg;
+    const btn = document.getElementById('modal-confirm-ok');
+    const handler = () => {
+      btn.removeEventListener('click', handler);
+      closeModal('modal-confirm');
+      resolve(true);
+    };
+    btn.addEventListener('click', handler);
+    openModal('modal-confirm');
+  });
+}
+
+/** Generic fetch wrapper with error handling */
+async function apiFetch(url, opts = {}) {
+  const res  = await fetch(url, { headers: { 'Content-Type': 'application/json' }, ...opts });
+  const data = await res.json();
+  return data;
+}
+
+/** Build pagination HTML */
+function buildPagination(containerId, currentPage, totalPages, loadFn) {
+  const c = document.getElementById(containerId);
+  if (!c) return;
+
+  const total_info = '';   // populated by caller optionally
+  const maxPages = 7;
+
+  let btns = '';
+  const start = Math.max(1, currentPage - 3);
+  const end   = Math.min(totalPages, start + maxPages - 1);
+
+  for (let p = start; p <= end; p++) {
+    btns += `<button class="page-btn ${p === currentPage ? 'active' : ''}" onclick="${loadFn}(${p})">${p}</button>`;
+  }
+
+  c.innerHTML = `
+    <span>Page ${currentPage} of ${totalPages}</span>
+    <div class="pagination-btns">
+      <button class="page-btn" onclick="${loadFn}(1)"       ${currentPage <= 1 ? 'disabled' : ''}>«</button>
+      <button class="page-btn" onclick="${loadFn}(${currentPage-1})" ${currentPage <= 1 ? 'disabled' : ''}>‹</button>
+      ${btns}
+      <button class="page-btn" onclick="${loadFn}(${currentPage+1})" ${currentPage >= totalPages ? 'disabled' : ''}>›</button>
+      <button class="page-btn" onclick="${loadFn}(${totalPages})"    ${currentPage >= totalPages ? 'disabled' : ''}>»</button>
+    </div>
+  `;
+}
+
+/** Debounce helper for search inputs */
+function debounce(fn, ms) {
+  let timer;
+  return (...args) => { clearTimeout(timer); timer = setTimeout(() => fn(...args), ms); };
+}
+
+
+/* ================================================================
+   ROUTER
+   Manages which panel is visible and calls the module's onEnter().
+   To register a new module: router.register('key', MODULE_object)
+   ================================================================ */
+const router = (() => {
+  const modules = {};
+  let current   = null;
+
+  return {
+    register(key, mod) { modules[key] = mod; },
+
+    go(key) {
+      // Hide all panels, deactivate sidebar items
+      document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+      document.querySelectorAll('.sidebar-item[data-panel]').forEach(b => b.classList.remove('active'));
+
+      // Show target panel
+      const panel = document.getElementById(`panel-${key}`);
+      if (panel) panel.classList.add('active');
+
+      // Activate sidebar item
+      const sideBtn = document.querySelector(`.sidebar-item[data-panel="${key}"]`);
+      if (sideBtn) sideBtn.classList.add('active');
+
+      current = key;
+
+      // Call module entry hook
+      if (modules[key] && typeof modules[key].onEnter === 'function') {
+        modules[key].onEnter();
+      }
+    },
+  };
+})();
+
+
+/* ================================================================
+   MODULE: DATABASE OVERVIEW
+   ================================================================ */
+const MODULE_overview = {
+  onEnter() { this.load(); },
+
+  async load() {
+    const data = await apiFetch('/api/admin/database-overview').catch(() => null);
+    if (!data || !data.success) { toast('Could not load overview.', 'error'); return; }
+
+    const stats = [
+      { label: 'Registered Customers', value: data.total_customers, color: 'var(--accent)' },
+      { label: 'Unknown Customers',    value: data.total_unknown,   color: 'var(--accent-red)' },
+      { label: 'Total Visit Logs',     value: data.total_logs,      color: 'var(--accent-blue)' },
+      { label: 'Known Today',          value: data.known_today,     color: 'var(--accent-green)' },
+      { label: 'Unknown Today',        value: data.unknown_today,   color: 'var(--accent-red)' },
+      { label: 'Returning Today',      value: data.returning_today, color: 'var(--accent-amber)' },
+      { label: 'Face Cache (known)',   value: data.cache_known,     color: 'var(--accent)' },
+      { label: 'Face Cache (unknown)', value: data.cache_unknown,   color: 'var(--accent-amber)' },
+      { label: 'DB Size',              value: data.db_size,         color: 'var(--accent-blue)' },
+    ];
+
+    document.getElementById('overview-stats').innerHTML = stats.map(s => `
+      <div class="stat-card" style="--stat-color:${s.color}">
+        <div class="stat-value">${esc(String(s.value))}</div>
+        <div class="stat-label">${esc(s.label)}</div>
+      </div>
+    `).join('');
+  },
+
+  async refreshCache() {
+    const data = await apiFetch('/api/admin/cache/refresh', { method: 'POST' }).catch(() => null);
+    if (data?.success) {
+      toast(`Cache refreshed: ${data.cache_known} known, ${data.cache_unknown} unknown loaded.`);
+      this.load();
+    } else {
+      toast(data?.message || 'Cache refresh failed.', 'error');
+    }
+  },
+};
+
+router.register('overview', MODULE_overview);
+
+
+/* ================================================================
+   MODULE: RECOGNITION SETTINGS
+   ================================================================ */
+const SETTING_FIELDS = [
+  { key: 'new_face_delay',            parse: parseFloat },
+  { key: 'cooldown_seconds',          parse: parseFloat },
+  { key: 'pending_expire_seconds',    parse: parseFloat },
+  { key: 'known_threshold',           parse: parseFloat },
+  { key: 'unknown_threshold',         parse: parseFloat },
+  { key: 'dashboard_refresh_seconds', parse: parseInt   },
+  { key: 'auto_delete_logs_days',     parse: parseInt   },
+];
+
+const MODULE_settings = {
+  _original: {},
+  _dirty:    false,
+
+  onEnter() { this.loadAndReload(); },
+
+  async loadAndReload() {
+    document.getElementById('settings-status').textContent = 'Loading…';
+    const data = await apiFetch('/api/settings').catch(() => null);
+    if (!data) { toast('Failed to load settings.', 'error'); return; }
+    this._populate(data);
+    document.getElementById('settings-status').textContent = 'Loaded from database.';
+  },
+
+  _populate(data) {
+    SETTING_FIELDS.forEach(({ key }) => {
+      const el = document.getElementById(`s-${key}`);
+      if (el && data[key] !== undefined) el.value = data[key];
+    });
+    this._original = this._read();
+    this._dirty    = false;
+    document.getElementById('btn-save-settings').disabled = true;
+  },
+
+  _read() {
+    const out = {};
+    SETTING_FIELDS.forEach(({ key, parse }) => {
+      const el = document.getElementById(`s-${key}`);
+      if (el) out[key] = parse(el.value);
+    });
+    return out;
+  },
+
+  checkDirty() {
+    const cur = this._read();
+    this._dirty = SETTING_FIELDS.some(({ key }) => cur[key] !== this._original[key]);
+    document.getElementById('btn-save-settings').disabled = !this._dirty;
+    document.getElementById('settings-status').textContent = this._dirty ? 'Unsaved changes.' : 'No changes.';
+  },
+
+  async save() {
+    const payload = this._read();
+
+    // Validation
+    if (payload.pending_expire_seconds <= payload.new_face_delay) {
+      toast('Pending timeout must be greater than new face delay.', 'error'); return;
+    }
+    if (payload.unknown_threshold >= payload.known_threshold) {
+      toast('Returning unknown threshold should be lower than known threshold.', 'error'); return;
+    }
+
+    const btn = document.getElementById('btn-save-settings');
+    const orig = btn.innerHTML;
+    btn.disabled  = true;
+    btn.innerHTML = 'Saving…';
+
+    const data = await apiFetch('/api/settings', {
+      method: 'POST',
+      body:   JSON.stringify(payload),
+    }).catch(() => null);
+
+    if (data?.success) {
+      this._populate(data.settings || payload);
+      toast('Recognition settings saved.');
+      document.getElementById('settings-status').textContent = `Saved at ${new Date().toLocaleTimeString()}`;
+    } else {
+      toast(data?.message || 'Save failed.', 'error');
+      btn.disabled  = false;
+      btn.innerHTML = orig;
+    }
+  },
+
+  async resetDefaults() {
+    const ok = await confirm('Reset to Defaults', 'This will overwrite all recognition settings with factory defaults. Are you sure?');
+    if (!ok) return;
+
+    const data = await apiFetch('/api/admin/settings/reset-defaults', { method: 'POST' }).catch(() => null);
+    if (data?.success) {
+      this._populate(data.settings);
+      toast('Settings reset to defaults.');
+      document.getElementById('settings-status').textContent = 'Reset to defaults.';
+    } else {
+      toast(data?.message || 'Reset failed.', 'error');
+    }
+  },
+};
+
+// Attach change listeners to setting inputs
+document.querySelectorAll('[id^="s-"]').forEach(el => {
+  el.addEventListener('input',  () => MODULE_settings.checkDirty());
+  el.addEventListener('change', () => MODULE_settings.checkDirty());
+});
+
+router.register('settings', MODULE_settings);
+
+
+/* ================================================================
+   MODULE: REGISTERED CUSTOMERS
+   ================================================================ */
+const MODULE_customers = {
+  _page:    1,
+  _search:  '',
+  _searchTimer: null,
+
+  onEnter() { this.load(); },
+
+  onSearch: debounce(function() {
+    MODULE_customers._page   = 1;
+    MODULE_customers._search = document.getElementById('cust-search').value;
+    MODULE_customers.load();
+  }, 350),
+
+  async load(page = 1) {
+    this._page = page;
+    const sort  = document.getElementById('cust-sort').value;
+    const order = document.getElementById('cust-order').value;
+    const q     = encodeURIComponent(document.getElementById('cust-search').value);
+
+    const data = await apiFetch(
+      `/api/admin/customers?search=${q}&sort=${sort}&order=${order}&page=${page}&per_page=20`
+    ).catch(() => null);
+
+    const tbody = document.getElementById('customers-tbody');
+
+    if (!data?.success) {
+      tbody.innerHTML = '<tr class="empty-row"><td colspan="8">Failed to load customers.</td></tr>';
+      return;
+    }
+
+    if (data.items.length === 0) {
+      tbody.innerHTML = '<tr class="empty-row"><td colspan="8">No customers found.</td></tr>';
+      document.getElementById('customers-pagination').innerHTML = '';
+      return;
+    }
+
+    tbody.innerHTML = data.items.map(c => `
+      <tr>
+        <td class="mono">${c.id}</td>
+        <td><strong>${esc(c.name)}</strong></td>
+        <td class="mono">${esc(c.email) || '<span style="color:var(--text-3)">—</span>'}</td>
+        <td class="mono">${esc(c.phone) || '<span style="color:var(--text-3)">—</span>'}</td>
+        <td><span style="font-family:var(--font-mono);color:var(--accent)">${c.visit_count}</span></td>
+        <td class="mono">${esc(c.created_at)}</td>
+        <td class="mono">${esc(c.last_seen)}</td>
+        <td style="white-space:nowrap">
+          <button class="btn btn-sm btn-secondary" onclick="MODULE_customers.openEdit(${c.id},'${esc(c.name)}','${esc(c.email)}','${esc(c.phone)}')">Edit</button>
+          <button class="btn btn-sm btn-danger"    onclick="MODULE_customers.delete(${c.id},'${esc(c.name)}')" style="margin-left:.25rem">Delete</button>
+        </td>
+      </tr>
+    `).join('');
+
+    buildPagination('customers-pagination', data.page, data.total_pages, 'MODULE_customers.load');
+  },
+
+  openEdit(id, name, email, phone) {
+    document.getElementById('edit-customer-id').value = id;
+    document.getElementById('edit-name').value        = name;
+    document.getElementById('edit-email').value       = email;
+    document.getElementById('edit-phone').value       = phone;
+    openModal('modal-edit-customer');
+  },
+
+  async submitEdit() {
+    const id    = document.getElementById('edit-customer-id').value;
+    const name  = document.getElementById('edit-name').value.trim();
+    const email = document.getElementById('edit-email').value.trim();
+    const phone = document.getElementById('edit-phone').value.trim();
+
+    if (!name) { toast('Name is required.', 'error'); return; }
+
+    const data = await apiFetch(`/api/admin/customers/${id}`, {
+      method: 'PUT',
+      body:   JSON.stringify({ name, email, phone }),
+    }).catch(() => null);
+
+    if (data?.success) {
+      toast('Customer updated.');
+      closeModal('modal-edit-customer');
+      this.load(this._page);
+    } else {
+      toast(data?.message || 'Update failed.', 'error');
+    }
+  },
+
+  async delete(id, name) {
+    const ok = await confirm('Delete Customer', `Delete "${name}" (ID ${id})? This will also remove their visit logs and evict them from the recognition cache immediately.`);
+    if (!ok) return;
+
+    const data = await apiFetch(`/api/admin/customers/${id}`, { method: 'DELETE' }).catch(() => null);
+    if (data?.success) {
+      toast(`Customer "${name}" deleted.`);
+      this.load(this._page);
+    } else {
+      toast(data?.message || 'Delete failed.', 'error');
+    }
+  },
+};
+
+router.register('customers', MODULE_customers);
+
+
+/* ================================================================
+   MODULE: UNKNOWN CUSTOMERS
+   ================================================================ */
+const MODULE_unknown = {
+  _page: 1,
+
+  onEnter() { this.load(); },
+
+  onSearch: debounce(function() {
+    MODULE_unknown._page = 1;
+    MODULE_unknown.load();
+  }, 350),
+
+  async load(page = 1) {
+    this._page  = page;
+    const sort  = document.getElementById('unk-sort').value;
+    const order = document.getElementById('unk-order').value;
+    const q     = encodeURIComponent(document.getElementById('unk-search').value);
+
+    const data = await apiFetch(
+      `/api/admin/unknown-customers?search=${q}&sort=${sort}&order=${order}&page=${page}&per_page=20`
+    ).catch(() => null);
+
+    const tbody = document.getElementById('unknown-tbody');
+
+    if (!data?.success) {
+      tbody.innerHTML = '<tr class="empty-row"><td colspan="5">Failed to load.</td></tr>';
+      return;
+    }
+
+    if (data.items.length === 0) {
+      tbody.innerHTML = '<tr class="empty-row"><td colspan="5">No unknown customers found.</td></tr>';
+      document.getElementById('unknown-pagination').innerHTML = '';
+      return;
+    }
+
+    tbody.innerHTML = data.items.map(u => `
+      <tr>
+        <td class="mono">${u.id}</td>
+        <td><span style="font-family:var(--font-mono);color:var(--accent-amber)">${u.visit_count}</span></td>
+        <td class="mono">${esc(u.first_seen)}</td>
+        <td class="mono">${esc(u.last_seen)}</td>
+        <td>
+          <!-- Extension point: "Convert to Registered" button can be added here -->
+          <button class="btn btn-sm btn-danger" onclick="MODULE_unknown.deleteOne(${u.id})">Delete</button>
+        </td>
+      </tr>
+    `).join('');
+
+    buildPagination('unknown-pagination', data.page, data.total_pages, 'MODULE_unknown.load');
+  },
+
+  async deleteOne(id) {
+    const ok = await confirm('Delete Unknown Customer', `Delete Unknown Customer #${id}? Their visit logs will also be removed and the cache will update immediately.`);
+    if (!ok) return;
+
+    const data = await apiFetch(`/api/admin/unknown-customers/${id}`, { method: 'DELETE' }).catch(() => null);
+    if (data?.success) {
+      toast(`Unknown customer #${id} deleted.`);
+      this.load(this._page);
+    } else {
+      toast(data?.message || 'Delete failed.', 'error');
+    }
+  },
+
+  async deleteAll() {
+    const ok = await confirm('Delete ALL Unknown Customers', 'This will permanently delete every unknown customer and their visit logs. The recognition cache will be cleared immediately. This cannot be undone.');
+    if (!ok) return;
+
+    const data = await apiFetch('/api/admin/unknown-customers', { method: 'DELETE' }).catch(() => null);
+    if (data?.success) {
+      toast(data.message || 'All unknown customers deleted.');
+      this.load(1);
+    } else {
+      toast(data?.message || 'Delete failed.', 'error');
+    }
+  },
+};
+
+router.register('unknown', MODULE_unknown);
+
+
+/* ================================================================
+   MODULE: VISIT LOGS
+   ================================================================ */
+const MODULE_logs = {
+  _page: 1,
+
+  onEnter() { this.load(); },
+
+  onSearch: debounce(function() {
+    MODULE_logs._page = 1;
+    MODULE_logs.load();
+  }, 350),
+
+  buildParams(page) {
+    const q    = encodeURIComponent(document.getElementById('log-search').value);
+    const type = document.getElementById('log-type').value;
+    const from = document.getElementById('log-date-from').value;
+    const to   = document.getElementById('log-date-to').value;
+    return `search=${q}&type=${type}&date_from=${from}&date_to=${to}&page=${page}&per_page=30`;
+  },
+
+  async load(page = 1) {
+    this._page = page;
+    const data = await apiFetch(`/api/admin/visit-logs?${this.buildParams(page)}`).catch(() => null);
+
+    const tbody = document.getElementById('logs-tbody');
+
+    if (!data?.success) {
+      tbody.innerHTML = '<tr class="empty-row"><td colspan="5">Failed to load logs.</td></tr>';
+      return;
+    }
+
+    if (data.items.length === 0) {
+      tbody.innerHTML = '<tr class="empty-row"><td colspan="5">No visit logs found.</td></tr>';
+      document.getElementById('logs-pagination').innerHTML = '';
+      return;
+    }
+
+    const badgeMap = {
+      known:             '<span class="badge badge-known">Known</span>',
+      unknown:           '<span class="badge badge-unknown">Unknown</span>',
+      returning_unknown: '<span class="badge badge-returning">Returning</span>',
+    };
+
+    tbody.innerHTML = data.items.map(l => `
+      <tr>
+        <td class="mono">${l.id}</td>
+        <td>${esc(l.name)}</td>
+        <td>${badgeMap[l.customer_type] || `<span class="badge badge-neutral">${esc(l.customer_type)}</span>`}</td>
+        <td class="mono">${l.customer_id}</td>
+        <td class="mono">${esc(l.visit_time)}</td>
+      </tr>
+    `).join('');
+
+    buildPagination('logs-pagination', data.page, data.total_pages, 'MODULE_logs.load');
+  },
+
+  clearFilters() {
+    document.getElementById('log-search').value    = '';
+    document.getElementById('log-type').value      = '';
+    document.getElementById('log-date-from').value = '';
+    document.getElementById('log-date-to').value   = '';
+    this.load(1);
+  },
+
+  promptDeleteOld() {
+    openModal('modal-delete-logs');
+  },
+
+  async confirmDeleteOld() {
+    const days = parseInt(document.getElementById('delete-logs-days').value);
+    if (!days || days < 1) { toast('Enter a valid number of days.', 'error'); return; }
+
+    closeModal('modal-delete-logs');
+
+    const data = await apiFetch('/api/admin/visit-logs/delete-old', {
+      method: 'DELETE',
+      body:   JSON.stringify({ days }),
+    }).catch(() => null);
+
+    if (data?.success) {
+      toast(data.message || 'Old logs deleted.');
+      this.load(1);
+    } else {
+      toast(data?.message || 'Delete failed.', 'error');
+    }
+  },
+};
+
+router.register('logs', MODULE_logs);
+
+
+/* ================================================================
+   MODULE: SYSTEM INFORMATION
+   ================================================================ */
+const MODULE_sysinfo = {
+  onEnter() { this.load(); },
+
+  async load() {
+    const grid = document.getElementById('sysinfo-grid');
+    grid.innerHTML = '<div style="color:var(--text-2);font-size:.8125rem;padding:.5rem">Loading…</div>';
+
+    const data = await apiFetch('/api/admin/system-info').catch(() => null);
+
+    if (!data?.success) {
+      grid.innerHTML = '<div style="color:var(--accent-red);font-size:.8125rem;padding:.5rem">Failed to load system info.</div>';
+      return;
+    }
+
+    const dotFor = (status, goodVal = 'connected') => {
+      const ok = status === goodVal || status === 'active';
+      return `<span class="status-dot ${ok ? 'dot-green' : 'dot-red'}"></span>`;
+    };
+
+    const cards = [
+      { label: 'Python',            value: data.python },
+      { label: 'Flask',             value: data.flask },
+      { label: 'OpenCV',            value: data.opencv },
+      { label: 'NumPy',             value: data.numpy },
+      { label: 'face_recognition',  value: data.face_recognition },
+      { label: 'PostgreSQL',        value: data.postgresql },
+      { label: 'Application Start', value: data.app_start },
+      { label: 'Uptime',            value: data.uptime, color: 'var(--accent)' },
+      { label: 'Database',          value: `${dotFor(data.db_status,'connected')}${data.db_status}`, raw: true },
+      { label: 'Camera',            value: `${dotFor(data.camera_status,'active')}${data.camera_status}`, raw: true },
+      { label: 'Recognition Cache', value: data.cache_status, color: 'var(--accent)' },
+      { label: 'Known in Cache',    value: String(data.cache_known),   color: 'var(--accent-green)' },
+      { label: 'Unknown in Cache',  value: String(data.cache_unknown), color: 'var(--accent-amber)' },
+    ];
+
+    grid.innerHTML = cards.map(c => `
+      <div class="info-card">
+        <div class="info-card-label">${esc(c.label)}</div>
+        <div class="info-card-value" style="${c.color ? `color:${c.color}` : ''}">
+          ${c.raw ? c.value : esc(c.value)}
+        </div>
+      </div>
+    `).join('');
+  },
+};
+
+router.register('sysinfo', MODULE_sysinfo);
+
+
+/* ================================================================
+   KEYBOARD shortcuts
+   ================================================================ */
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    document.querySelectorAll('.modal-backdrop.open').forEach(m => m.classList.remove('open'));
+  }
+});
+
+
+/* ================================================================
+   BOOTSTRAP — show Overview on load
+   ================================================================ */
+document.addEventListener('DOMContentLoaded', () => {
+  router.go('overview');
+});
+</script>
+
+</body>
+</html>

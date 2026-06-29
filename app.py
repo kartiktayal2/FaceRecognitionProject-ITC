@@ -1,904 +1,1559 @@
+# =============================================================
+# ITC Customer Analytics — app.py
+# Flask + OpenCV + face_recognition + PostgreSQL
+# =============================================================
+
 import base64
 import cv2
-from flask import Flask, render_template, request
-import sqlite3
 import face_recognition
 import io
-from PIL import Image
+import json
 import numpy as np
-import json 
-import requests
-from sync_faces import sync_staff_faces
-from flask import Flask, render_template, request, Response
+import os
+import time
+
+from PIL import Image
 from datetime import datetime, timedelta
-last_seen = {}
-unknown_last_seen = {}
-last_yellow_seen = {}
-last_red_seen = {}
-attendance_marked = {}
-known_encodings = []
-known_names = []
-known_staff_codes = []
-known_ids = []
-unknown_encodings = []
-unknown_ids = []
-COUNT_INTERVAL = 10
-last_unknown_seen = None
-camera = cv2.VideoCapture(0)
+
+from flask import (
+    Flask,
+    render_template,
+    request,
+    Response,
+    jsonify,
+)
+
+from database import get_connection
 
 
-def refresh_face_cache():
-    load_staff_faces()
-    load_unknown_faces()
-
-def get_connection():
-    return sqlite3.connect("database.db")
+# =============================================================
+# FLASK APP INIT
+# =============================================================
 
 app = Flask(__name__)
-@app.route('/register-page')
-def register_page():
-    return render_template("register.html")
 
-@app.route('/')
+# Used by the System Information panel in the Admin Panel
+APP_START_TIME: datetime = datetime.now()
+
+
+# =============================================================
+# SYSTEM SETTINGS — loaded from PostgreSQL at startup.
+# The table `system_settings` must already exist with id = 1.
+# Call reload_system_settings() after any POST to /settings so
+# the new values take effect immediately without a server restart.
+# =============================================================
+
+# Safe fallback defaults — used only if the DB row is missing.
+_SETTINGS_DEFAULTS: dict = {
+    "new_face_delay":           3,
+    "cooldown_seconds":         10,
+    "pending_expire_seconds":   8,
+    "known_threshold":          0.45,
+    "unknown_threshold":        0.40,
+    "dashboard_refresh_seconds":5,
+    "auto_delete_logs_days":    3,
+}
+
+
+def load_system_settings() -> dict:
+    """
+    Read the single system_settings row (id = 1) from PostgreSQL.
+    Returns a plain dict keyed by column name.
+    Falls back to _SETTINGS_DEFAULTS if the row is not found or
+    a database error occurs, so the application never crashes on startup.
+    """
+    try:
+        conn = get_connection()
+        cur  = conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                new_face_delay,
+                cooldown_seconds,
+                pending_expire_seconds,
+                known_threshold,
+                unknown_threshold,
+                dashboard_refresh_seconds,
+                auto_delete_logs_days
+            FROM system_settings
+            WHERE id = 1
+            """
+        )
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+
+        if row is None:
+            print("[settings] WARNING: system_settings row id=1 not found — using defaults.")
+            return dict(_SETTINGS_DEFAULTS)
+
+        return {
+            "new_face_delay":           float(row[0]),
+            "cooldown_seconds":         float(row[1]),
+            "pending_expire_seconds":   float(row[2]),
+            "known_threshold":          float(row[3]),
+            "unknown_threshold":        float(row[4]),
+            "dashboard_refresh_seconds":int(row[5]),
+            "auto_delete_logs_days":    int(row[6]),
+        }
+
+    except Exception as exc:
+        print(f"[settings] ERROR loading system settings: {exc} — using defaults.")
+        return dict(_SETTINGS_DEFAULTS)
+
+
+def reload_system_settings() -> None:
+    """
+    Re-read system_settings from PostgreSQL and update the global
+    SETTINGS dict in-place so all in-flight requests pick up the new
+    values without a server restart.
+    """
+    global SETTINGS
+    SETTINGS = load_system_settings()
+    print(f"[settings] Reloaded: {SETTINGS}")
+
+
+# Load once at module import time; routes use SETTINGS[...] directly.
+SETTINGS: dict = load_system_settings()
+print(f"[settings] Loaded at startup: {SETTINGS}")
+
+
+# =============================================================
+# IN-MEMORY FACE CACHE
+# Loaded at startup; refreshed only after registration or
+# after a new unknown customer is inserted.
+# =============================================================
+
+known_encodings  = []   # list of np.ndarray
+known_names      = []   # list of str
+known_ids        = []   # list of int (customers.id)
+
+unknown_encodings = []  # list of np.ndarray
+unknown_ids       = []  # list of int (unknown_customers.id)
+
+
+# =============================================================
+# COOLDOWN / STATE TRACKING (in-process RAM only)
+# =============================================================
+
+# {customer_id: datetime}  — prevents re-counting known customers
+known_cooldown: dict = {}
+
+# {unknown_customer_id: datetime}  — prevents re-counting returning unknown
+returning_cooldown: dict = {}
+
+# Tracks brand-new faces that haven't been inserted yet.
+# Key: a rounded tuple of the first 8 encoding values (fingerprint).
+# Value: {'first_seen': datetime, 'encoding': np.ndarray}
+pending_new_faces: dict = {}
+
+# NOTE: NEW_FACE_WAIT_SECONDS, COOLDOWN_SECONDS, and PENDING_EXPIRE_SECONDS
+# are no longer hardcoded here. Use SETTINGS["new_face_delay"],
+# SETTINGS["cooldown_seconds"], and SETTINGS["pending_expire_seconds"] instead.
+
+
+# =============================================================
+# CAMERA — isolated so it can be swapped for a different
+#          source at deployment time without touching logic.
+# =============================================================
+
+CAMERA_INDEX = int(os.environ.get("CAMERA_INDEX", 0))
+camera: cv2.VideoCapture = cv2.VideoCapture(CAMERA_INDEX)
+
+
+# =============================================================
+# HELPER — encoding fingerprint
+# A cheap, hashable key derived from the first 8 floats of the
+# 128-d face encoding.  Good enough to group frames of the same
+# face without a full distance search.
+# =============================================================
+
+def _face_key(encoding: np.ndarray) -> tuple:
+    return tuple(np.round(encoding[:8], 2))
+
+
+# =============================================================
+# HELPER — upsert today's row in daily_statistics
+# =============================================================
+
+def _ensure_daily_stats(cur, today: str) -> None:
+    """Insert today's row if it does not yet exist."""
+    cur.execute(
+        """
+        INSERT INTO daily_statistics (stat_date, known_today, unknown_today, returning_unknown_today)
+        VALUES (%s, 0, 0, 0)
+        ON CONFLICT (stat_date) DO NOTHING
+        """,
+        (today,),
+    )
+
+
+# =============================================================
+# HELPER — log a visit and bump daily statistics
+# customer_type: 'known' | 'unknown' | 'returning_unknown'
+# =============================================================
+
+def _record_visit(cur, customer_type: str, customer_id: int, today: str) -> None:
+    """Insert a visit_log row and increment the matching daily counter."""
+    cur.execute(
+        """
+        INSERT INTO visit_logs (customer_type, customer_id, visit_time)
+        VALUES (%s, %s, NOW())
+        """,
+        (customer_type, customer_id),
+    )
+
+    if customer_type == "known":
+        col = "known_today"
+    elif customer_type == "unknown":
+        col = "unknown_today"
+    else:
+        col = "returning_unknown_today"
+
+    cur.execute(
+        f"""
+        UPDATE daily_statistics
+        SET {col} = {col} + 1
+        WHERE stat_date = %s
+        """,
+        (today,),
+    )
+
+
+# =============================================================
+# CACHE LOAD FUNCTIONS
+# =============================================================
+
+def load_customer_faces() -> None:
+    """Load all registered customers into RAM."""
+    global known_encodings, known_names, known_ids
+
+    conn = get_connection()
+    cur  = conn.cursor()
+
+    cur.execute(
+        "SELECT id, name, face_encoding FROM customers"
+    )
+    rows = cur.fetchall()
+
+    conn.close()
+
+    known_ids       = [r[0] for r in rows]
+    known_names     = [r[1] for r in rows]
+    known_encodings = [np.array(json.loads(r[2])) for r in rows]
+
+    print(f"[cache] Loaded {len(rows)} customer face(s) into memory.")
+
+
+def load_unknown_faces() -> None:
+    """Load all previously-seen unknown customers into RAM."""
+    global unknown_encodings, unknown_ids
+
+    conn = get_connection()
+    cur  = conn.cursor()
+
+    cur.execute(
+        "SELECT id, face_encoding FROM unknown_customers"
+    )
+    rows = cur.fetchall()
+
+    conn.close()
+
+    unknown_ids       = [r[0] for r in rows]
+    unknown_encodings = [np.array(json.loads(r[1])) for r in rows]
+
+    print(f"[cache] Loaded {len(rows)} unknown face(s) into memory.")
+
+
+def refresh_face_cache() -> None:
+    """Reload both caches.  Call after any DB write that adds new faces."""
+    load_customer_faces()
+    load_unknown_faces()
+
+
+# =============================================================
+# MAINTENANCE — delete visit_logs older than 3 days
+# =============================================================
+
+def delete_old_logs() -> None:
+    conn = get_connection()
+    cur  = conn.cursor()
+
+    # Number of days to retain is configurable via system_settings.
+    cutoff = datetime.now() - timedelta(days=SETTINGS["auto_delete_logs_days"])
+
+    cur.execute(
+        "DELETE FROM visit_logs WHERE visit_time < %s",
+        (cutoff,),
+    )
+
+    deleted = cur.rowcount
+    conn.commit()
+    conn.close()
+
+    print(f"[maintenance] Deleted {deleted} old visit log(s) (older than 3 days).")
+
+
+# =============================================================
+# ROUTES — pages
+# =============================================================
+
+@app.route("/")
 def home():
     return render_template("index.html")
 
-@app.route('/register-camera', methods=['POST'])
-def register_camera():
 
-    data = request.json
+@app.route("/register-page")
+def register_page():
+    return render_template("register.html")
 
-    name = data["name"]
-    email = data["email"]
 
-    image_data = data["image"]
+@app.route("/dashboard")
+def dashboard():
+    """
+    Render the dashboard HTML page.
+    All actual data is fetched by the frontend via /dashboard-data (JSON).
+    """
+    return render_template("dashboard.html")
 
-    image_data = image_data.split(",")[1]
 
-    image_bytes = base64.b64decode(image_data)
+# =============================================================
+# ROUTE — dashboard data (JSON)
+# Returns stats, top customers, recent visits, and a dynamic
+# 7-day chart pulled from daily_statistics.
+# =============================================================
 
-    image = np.array(
-        Image.open(
-            io.BytesIO(image_bytes)
-        )
+@app.route("/dashboard-data")
+def dashboard_data():
+    conn = get_connection()
+    cur  = conn.cursor()
+
+    today = datetime.now().date().isoformat()
+
+    # --- Ensure today exists so counts never come back NULL ---
+    _ensure_daily_stats(cur, today)
+    conn.commit()
+
+    # --- Summary counts ---
+    cur.execute("SELECT COUNT(*) FROM customers")
+    total_registered = cur.fetchone()[0]
+
+    cur.execute(
+        "SELECT known_today, unknown_today, returning_unknown_today "
+        "FROM daily_statistics WHERE stat_date = %s",
+        (today,),
+    )
+    row = cur.fetchone()
+    known_today              = row[0] if row else 0
+    unknown_today            = row[1] if row else 0
+    returning_unknown_today  = row[2] if row else 0
+
+    # --- Top 5 customers by visit count ---
+    cur.execute(
+        """
+        SELECT name, visit_count
+        FROM customers
+        ORDER BY visit_count DESC
+        LIMIT 5
+        """
+    )
+    top_customers = [
+        {"name": r[0], "visit_count": r[1]}
+        for r in cur.fetchall()
+    ]
+
+    # --- Recent 10 visits ---
+    cur.execute(
+        """
+        SELECT
+            vl.customer_type,
+            vl.customer_id,
+            vl.visit_time,
+            COALESCE(c.name, 'Unknown #' || vl.customer_id::text) AS display_name
+        FROM visit_logs vl
+        LEFT JOIN customers c
+            ON vl.customer_type = 'known' AND c.id = vl.customer_id
+        ORDER BY vl.id DESC
+        LIMIT 10
+        """
+    )
+    recent_visits = [
+        {
+            "type":    r[0],
+            "id":      r[1],
+            "time":    r[2].strftime("%Y-%m-%d %H:%M:%S"),
+            "name":    r[3],
+        }
+        for r in cur.fetchall()
+    ]
+
+    # --- Last 7 days chart data from daily_statistics ---
+    cur.execute(
+        """
+        SELECT stat_date, known_today, unknown_today
+        FROM daily_statistics
+        WHERE stat_date >= CURRENT_DATE - INTERVAL '6 days'
+        ORDER BY stat_date ASC
+        """
+    )
+    chart_rows = cur.fetchall()
+
+    # Build a complete 7-day series (fill missing days with 0)
+    chart = []
+    for i in range(6, -1, -1):
+        d = (datetime.now().date() - timedelta(days=i)).isoformat()
+        chart.append({"day": d, "known": 0, "unknown": 0})
+
+    for r in chart_rows:
+        date_str = r[0].isoformat() if hasattr(r[0], "isoformat") else str(r[0])
+        for entry in chart:
+            if entry["day"] == date_str:
+                entry["known"]   = r[1]
+                entry["unknown"] = r[2]
+                break
+
+    conn.close()
+
+    return jsonify(
+        {
+            "total_registered":         total_registered,
+            "known_today":              known_today,
+            "unknown_today":            unknown_today,
+            "returning_unknown_today":  returning_unknown_today,
+            "top_customers":            top_customers,
+            "recent_visits":            recent_visits,
+            "chart":                    chart,
+        }
     )
 
-    encodings = face_recognition.face_encodings(image)
 
+# =============================================================
+# ROUTE — register a new customer via camera capture
+# =============================================================
+
+@app.route("/register-camera", methods=["POST"])
+def register_camera():
+    """
+    Accepts JSON: { name, email, phone, image (base64 data-URL) }
+    Encodes the face and stores it in PostgreSQL.
+    Reloads the in-memory cache automatically.
+    """
+    data = request.json
+
+    name  = data.get("name",  "").strip()
+    email = data.get("email", "").strip()
+    phone = data.get("phone", "").strip()
+    image_data = data.get("image", "")
+
+    if not name:
+        return jsonify({"success": False, "message": "Name is required."}), 400
+
+    # Decode base64 image
+    try:
+        raw = image_data.split(",")[1] if "," in image_data else image_data
+        image_bytes = base64.b64decode(raw)
+        image = np.array(Image.open(io.BytesIO(image_bytes)).convert("RGB"))
+    except Exception as exc:
+        return jsonify({"success": False, "message": f"Image decode error: {exc}"}), 400
+
+    # Detect and encode face
+    encodings = face_recognition.face_encodings(image)
     if len(encodings) == 0:
-        return "No face detected"
+        return jsonify({"success": False, "message": "No face detected in the image."}), 400
 
     encoding = encodings[0]
 
+    # Persist to PostgreSQL
     conn = get_connection()
-    cur = conn.cursor()
+    cur  = conn.cursor()
 
     cur.execute(
         """
-        INSERT INTO users(name,email,face_encoding)
-        VALUES(?,?,?)
+        INSERT INTO customers (name, email, phone, face_encoding)
+        VALUES (%s, %s, %s, %s)
         """,
-        (
-            name,
-            email,
-            json.dumps(encoding.tolist())
-        )
+        (name, email, phone, json.dumps(encoding.tolist())),
     )
 
     conn.commit()
     conn.close()
 
-    return "User Registered Successfully"
+    # Reload cache so the new face is active immediately
+    refresh_face_cache()
 
-@app.route('/scan', methods=['POST'])
-def scan():
+    return jsonify({"success": True, "message": f"Customer '{name}' registered successfully."})
 
-    image_file = request.files['image']
 
-    image = face_recognition.load_image_file(image_file)
+# =============================================================
+# ROUTE — list all registered customers (JSON)
+# =============================================================
 
-    encodings = face_recognition.face_encodings(image)
-
-    if len(encodings) == 0:
-        return "No face detected"
-
-    uploaded_encoding = encodings[0]
-
+@app.route("/customers")
+def list_customers():
     conn = get_connection()
-    cur = conn.cursor()
+    cur  = conn.cursor()
 
     cur.execute(
-        "SELECT id,name,email,face_encoding FROM users"
+        """
+        SELECT id, name, email, phone, visit_count, created_at, last_seen
+        FROM customers
+        ORDER BY name ASC
+        """
     )
-
-    users = cur.fetchall()
-
+    rows = cur.fetchall()
     conn.close()
 
-    for user in users:
-
-        stored_encoding = np.array(
-            json.loads(user[3])
-        )
-
-        distance = face_recognition.face_distance(
-            [stored_encoding],
-            uploaded_encoding
-        )[0]
-
-        print("Checking:", user[1])
-        print("Distance:", distance)
-
-        if distance < 0.60:
-
-            return f"""
-            <h1>{user[1]}</h1>
-            <p>ID: {user[0]}</p>
-            <p>Email: {user[2]}</p>
-            """
-    return "User Not Found"
-
-@app.route('/dashboard-data')
-def dashboard_data():
-    conn = get_connection()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT name, visit_count
-        FROM staff_faces
-        ORDER BY visit_count DESC
-        LIMIT 5
-        """)
-    users = cur.fetchall()
-
-    cur.execute("SELECT COUNT(*) FROM staff_faces")
-    total_users = cur.fetchone()[0]
-
-    cur.execute("SELECT SUM(visit_count) FROM staff_faces")
-    total_visits = cur.fetchone()[0] or 0
-
-    cur.execute("SELECT unknown_count FROM stats WHERE id = 1")
-    unknown_count = cur.fetchone()[0]
-
-    cur.execute("""
-        SELECT user_name, status, visit_time
-        FROM visitor_logs
-        ORDER BY id DESC
-        LIMIT 10
-    """)
-    logs = cur.fetchall()
-
-    conn.close()
-
-    return {
-    "users": users,
-    "logs": logs,
-    "total_users": total_users,
-    "total_visits": total_visits,
-    "unknown_count": unknown_count,
-
-    "attendance": [
+    customers = [
         {
-            "day": "Monday",
-            "known": 42,
-            "unknown": 8
-        },
-        {
-            "day": "Tuesday",
-            "known": 45,
-            "unknown": 5
-        },
-        {
-            "day": "Wednesday",
-            "known": 40,
-            "unknown": 10
-        },
-        {
-            "day": "Thursday",
-            "known": 48,
-            "unknown": 2
-        },
-        {
-            "day": "Friday",
-            "known": 43,
-            "unknown": 7
-        },
-        {
-            "day": "Saturday",
-            "known": 38,
-            "unknown": 12
+            "id":          r[0],
+            "name":        r[1],
+            "email":       r[2],
+            "phone":       r[3],
+            "visit_count": r[4],
+            "created_at":  r[5].strftime("%Y-%m-%d %H:%M:%S"),
+            "last_seen":   r[6].strftime("%Y-%m-%d %H:%M:%S"),
         }
+        for r in rows
     ]
-}
+
+    return jsonify(customers)
 
 
-@app.route('/scan-camera', methods=['POST'])
-def scan_camera():
-    data = request.json
+# =============================================================
+# ROUTE — delete a registered customer
+# =============================================================
 
-    image_data = data["image"]
-    image_data = image_data.split(",")[1]
-
-    image_bytes = base64.b64decode(image_data)
-
-    image = np.array(
-        Image.open(
-            io.BytesIO(image_bytes)
-        )
-    )
-
-    encodings = face_recognition.face_encodings(image)
-
-    if len(encodings) == 0:
-        return "No face detected"
-
-    uploaded_encoding = encodings[0]
-
+@app.route("/delete-customer/<int:customer_id>", methods=["DELETE"])
+def delete_customer(customer_id):
     conn = get_connection()
-    cur = conn.cursor()
+    cur  = conn.cursor()
 
-    cur.execute(
-    "SELECT id,name,email,face_encoding FROM users"
-    )
-
-    users = cur.fetchall()
-
+    cur.execute("DELETE FROM customers WHERE id = %s", (customer_id,))
+    conn.commit()
     conn.close()
 
-    for user in users:
+    refresh_face_cache()
 
-        stored_encoding = np.array(
-            json.loads(user[3])
-        )
+    return jsonify({"success": True, "message": f"Customer {customer_id} deleted."})
 
-        distance = face_recognition.face_distance(
-            [stored_encoding],
-            uploaded_encoding
-        )[0]
 
-        print("Checking:", user[1])
-        print("Distance:", distance)
-        
-        if distance < 0.60:
+# =============================================================
+# ROUTE — debug view (development aid, does not expose secrets)
+# =============================================================
 
-            conn_log = get_connection()
-            cur_log = conn_log.cursor()
-
-            from datetime import datetime
-
-            current_time = datetime.now()
-
-            should_count = False
-
-            if user[1] not in last_seen:
-
-                should_count = True
-
-            else:
-
-                difference = (
-                    current_time - last_seen[user[1]]
-                ).total_seconds()
-
-                print("Difference =", difference)
-
-                if difference > COUNT_INTERVAL:   # testing
-                    should_count = True
-
-                    print("Should Count After =", should_count)
-
-            if should_count:
-                last_seen[user[1]] = current_time
-
-                cur_log.execute(
-                    """
-                    INSERT INTO visitor_logs(user_name,status)
-                    VALUES(?,?)
-                    """,
-                    (user[1], "KNOWN")
-                )
-
-                cur_log.execute(
-                    """
-                    UPDATE users
-                    SET visit_count = visit_count + 1
-                    WHERE id = ?
-                    """,
-                    (user[0],)
-             )
-
-                conn_log.commit()
-
-            cur_log.execute(
-              """
-             SELECT visit_count
-                FROM users
-                WHERE id = ?
-                """,
-                (user[0],)
-            )
-
-            count = cur_log.fetchone()[0]
-
-            conn_log.close()
-
-            return f"""
-        <h1>{user[1]}</h1>
-        <p>ID: {user[0]}</p>
-        <p>Email: {user[2]}</p>
-        <p>Visit Count: {count}</p>
-        """
-
-    from datetime import datetime
-
-    global last_unknown_seen
-
-
-
-
-
-
-
-    # CHECK PREVIOUSLY SEEN UNKNOWN USERS
-
-    conn_unknown = get_connection()
-    cur_unknown = conn_unknown.cursor()
-
-    cur_unknown.execute("""
-    SELECT id, face_encoding, visit_count
-    FROM unknown_faces
-    """)
-
-    unknown_faces = cur_unknown.fetchall()
-
-    for unknown_user in unknown_faces:
-
-        stored_unknown_encoding = np.array(
-            json.loads(unknown_user[1])
-        )
-
-        distance = face_recognition.face_distance(
-            [stored_unknown_encoding],
-            uploaded_encoding
-        )[0]
-
-        if distance < 0.60:
-
-            cur_unknown.execute("""
-            UPDATE unknown_faces
-            SET visit_count = visit_count + 1,
-                last_seen = CURRENT_TIMESTAMP
-            WHERE id = ?
-            """,
-            (unknown_user[0],)
-            )
-
-            conn_unknown.commit()
-
-            count = unknown_user[2] + 1
-
-            conn_unknown.close()
-
-            return f"""
-            <h1 style='color:orange'>
-            Previously Seen Unknown User
-            </h1>
-
-            <p>Visit Count: {count}</p>
-            """
-
-    conn_unknown.close()
-    current_time = datetime.now()
-
-    should_count_unknown = False
-
-    if last_unknown_seen is None:
-
-        should_count_unknown = True
-
-    else:
-
-        difference = (
-            current_time - last_unknown_seen
-        ).total_seconds()
-
-        if difference > COUNT_INTERVAL:
-            should_count_unknown = True
-
-    if should_count_unknown:
-
-        conn_unknown_new = get_connection()
-        cur_unknown_new = conn_unknown_new.cursor()
-
-        cur_unknown_new.execute(
-        """
-        INSERT INTO unknown_faces(face_encoding)
-        VALUES(?)
-        """,
-        (
-            json.dumps(
-                uploaded_encoding.tolist()
-            ),
-        ))
-
-        conn_unknown_new.commit()
-        unknown_encodings.append(uploaded_encoding)
-        conn_unknown_new.close()
-
-        last_unknown_seen = current_time
-
-        conn = get_connection()
-        cur = conn.cursor()
-
-        cur.execute(
-        """
-        UPDATE stats
-        SET unknown_count = unknown_count + 1
-        WHERE id = 1
-        """
-        )
-
-        conn.commit()
-
-        cur.execute(
-        """
-        SELECT unknown_count
-        FROM stats
-        WHERE id = 1
-        """
-        )
-
-        unknown_count = cur.fetchone()[0]
-
-        conn.close()
-
-        return f"""
-        <h1 style='color:red'>
-        New Unknown User
-        </h1>
-
-        <p>Unknown Count: {unknown_count}</p>
-        """
-    return "Unknown User"
-
-
-@app.route('/debug-db')
+@app.route("/debug-db")
 def debug_db():
     conn = get_connection()
-    cur = conn.cursor()
+    cur  = conn.cursor()
 
-    # Check users table
-    cur.execute("SELECT id, name, email, visit_count FROM users")
-    users = cur.fetchall()
+    cur.execute("SELECT id, name, email, phone, visit_count FROM customers")
+    customers = cur.fetchall()
 
-    # Check stats table
-    cur.execute("SELECT * FROM stats")
+    cur.execute("SELECT id, visit_count, first_seen, last_seen FROM unknown_customers")
+    unknowns = cur.fetchall()
+
+    cur.execute("SELECT stat_date, known_today, unknown_today, returning_unknown_today FROM daily_statistics ORDER BY stat_date DESC LIMIT 7")
     stats = cur.fetchall()
 
     conn.close()
 
-    return f"""
-    <h2>Users Table</h2>
-    <pre>{users}</pre>
-    <h2>Stats Table</h2>
-    <pre>{stats}</pre>
+    return (
+        f"<h2>Customers</h2><pre>{customers}</pre>"
+        f"<h2>Unknown Customers</h2><pre>{unknowns}</pre>"
+        f"<h2>Daily Statistics</h2><pre>{stats}</pre>"
+    )
+
+
+# =============================================================
+# CAMERA — pause / resume (called by register page)
+# =============================================================
+
+@app.route("/pause-camera")
+def pause_camera():
+    global camera
+    if camera is not None:
+        camera.release()
+        camera = None
+    return "paused"
+
+
+@app.route("/resume-camera")
+def resume_camera():
+    global camera
+    camera = cv2.VideoCapture(CAMERA_INDEX)
+    return "resumed"
+
+
+# =============================================================
+# RECOGNITION CORE — process one face encoding per frame
+#
+#  STEP 1 — Compare vs registered customers (green, threshold 0.45)
+#  STEP 2 — Compare vs unknown_customers cache (yellow, threshold 0.40)
+#  STEP 3 — Brand new face: show red, wait 3 s, then insert
+# =============================================================
+
+def _process_face(face_encoding: np.ndarray) -> tuple:
     """
+    Determine the label, rectangle colour, and trigger any DB write
+    for a single detected face.
 
+    Returns (label: str, color: tuple[int,int,int])
+    """
+    global known_cooldown, returning_cooldown, pending_new_faces
+    global known_encodings, known_names, known_ids
+    global unknown_encodings, unknown_ids
 
-@app.route('/dashboard')
-def dashboard():
+    now   = datetime.now()
+    today = now.date().isoformat()
+
+    # ----------------------------------------------------------
+    # STEP 1 — registered customers
+    # ----------------------------------------------------------
+    if len(known_encodings) > 0:
+        distances        = face_recognition.face_distance(known_encodings, face_encoding)
+        best_idx         = int(np.argmin(distances))
+        best_dist        = distances[best_idx]
+
+        if best_dist < SETTINGS["known_threshold"]:
+            customer_id   = known_ids[best_idx]
+            customer_name = known_names[best_idx]
+
+            # Cooldown check
+            last = known_cooldown.get(customer_id)
+            if last is None or (now - last).total_seconds() > SETTINGS["cooldown_seconds"]:
+                known_cooldown[customer_id] = now
+
+                conn = get_connection()
+                cur  = conn.cursor()
+
+                _ensure_daily_stats(cur, today)
+
+                # Increment visit_count and update last_seen
+                cur.execute(
+                    """
+                    UPDATE customers
+                    SET visit_count = visit_count + 1,
+                        last_seen   = NOW()
+                    WHERE id = %s
+                    """,
+                    (customer_id,),
+                )
+
+                _record_visit(cur, "known", customer_id, today)
+
+                conn.commit()
+                conn.close()
+
+                # Sync the in-memory name list (visit_count not cached, so no update needed)
+                print(f"[recognition] Known customer: {customer_name} (id={customer_id})")
+
+            return customer_name, (0, 255, 0)   # green
+
+    # ----------------------------------------------------------
+    # STEP 2 — previously-seen unknown customers
+    # ----------------------------------------------------------
+    if len(unknown_encodings) > 0:
+        for i, stored_enc in enumerate(unknown_encodings):
+            dist = face_recognition.face_distance([stored_enc], face_encoding)[0]
+
+            if dist < SETTINGS["unknown_threshold"]:
+                unknown_id = unknown_ids[i]
+
+                last = returning_cooldown.get(unknown_id)
+                if last is None or (now - last).total_seconds() > SETTINGS["cooldown_seconds"]:
+                    returning_cooldown[unknown_id] = now
+
+                    conn = get_connection()
+                    cur  = conn.cursor()
+
+                    _ensure_daily_stats(cur, today)
+
+                    cur.execute(
+                        """
+                        UPDATE unknown_customers
+                        SET visit_count = visit_count + 1,
+                            last_seen   = NOW()
+                        WHERE id = %s
+                        """,
+                        (unknown_id,),
+                    )
+
+                    _record_visit(cur, "returning_unknown", unknown_id, today)
+
+                    conn.commit()
+                    conn.close()
+
+                    print(f"[recognition] Returning unknown id={unknown_id}")
+
+                return "Returning Unknown", (0, 215, 255)   # yellow
+
+    # ----------------------------------------------------------
+    # STEP 3 — brand new face
+    # Show red rectangle immediately.
+    # Only insert into DB after the face has been continuously
+    # visible for NEW_FACE_WAIT_SECONDS seconds.
+    # ----------------------------------------------------------
+    face_key = _face_key(face_encoding)
+
+    if face_key not in pending_new_faces:
+        pending_new_faces[face_key] = {
+            "first_seen": now,
+            "encoding":   face_encoding,
+        }
+        print(f"[recognition] New face detected, starting {SETTINGS['new_face_delay']}s timer.")
+        return "New Customer", (0, 0, 255)   # red
+
+    entry    = pending_new_faces[face_key]
+    elapsed  = (now - entry["first_seen"]).total_seconds()
+
+    if elapsed < SETTINGS["new_face_delay"]:
+        # Still within the wait window — keep showing red
+        return "New Customer", (0, 0, 255)
+
+    # Time has elapsed → insert into DB (once only, then remove from pending)
+    del pending_new_faces[face_key]
+
+    # Double-check: face must still be distant from all known customers
+    if len(known_encodings) > 0:
+        min_known_dist = float(np.min(face_recognition.face_distance(known_encodings, face_encoding)))
+        if min_known_dist < SETTINGS["known_threshold"]:
+            print("[recognition] Skipped insertion — too close to a known customer.")
+            return "New Customer", (0, 0, 255)
+
     conn = get_connection()
-    cur = conn.cursor()
+    cur  = conn.cursor()
 
-    # Registered users
-    cur.execute("""
-        SELECT name, visit_count
-        FROM staff_faces
-        ORDER BY visit_count DESC
-        LIMIT 5
-        """)
-    users = cur.fetchall()
+    _ensure_daily_stats(cur, today)
 
-    # Totals
-    cur.execute("SELECT COUNT(*) FROM staff_faces")
-    total_users = cur.fetchone()[0]
-
-    cur.execute("SELECT SUM(visit_count) FROM staff_faces")
-    total_visits = cur.fetchone()[0] or 0
-
-    cur.execute("SELECT unknown_count FROM stats WHERE id = 1")
-    unknown_count = cur.fetchone()[0]
-
-    # Highest visit count
-    cur.execute("SELECT MAX(visit_count) FROM staff_faces")
-    max_visits = cur.fetchone()[0] or 0
-
-    # Recent activity logs (last 10 entries)
-    cur.execute("""
-        SELECT user_name, status, visit_time
-        FROM visitor_logs
-        ORDER BY id DESC
-        LIMIT 10
-    """)
-    logs = cur.fetchall()
-
-    conn.close()
-
-    return render_template(
-        "dashboard.html",
-        users=users,
-        logs=logs,
-        total_users=total_users,
-        total_visits=total_visits,
-        unknown_count=unknown_count,
-        max_visits=max_visits
+    cur.execute(
+        """
+        INSERT INTO unknown_customers (face_encoding, visit_count, first_seen, last_seen)
+        VALUES (%s, 1, NOW(), NOW())
+        RETURNING id
+        """,
+        (json.dumps(face_encoding.tolist()),),
     )
+    new_unknown_id = cur.fetchone()[0]
 
+    _record_visit(cur, "unknown", new_unknown_id, today)
 
-
-def load_staff_faces():
-
-    global known_encodings
-    global known_names
-    global known_staff_codes
-    global known_ids
-
-    conn = get_connection()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT
-            staff_id,
-            staff_code,
-            name,
-            face_encoding
-        FROM staff_faces
-    """)
-
-    users = cur.fetchall()
-
+    conn.commit()
     conn.close()
 
-    known_encodings = [
-        np.array(json.loads(u[3]))
-        for u in users
-    ]
+    # Update RAM cache immediately (no full reload needed)
+    unknown_ids.append(new_unknown_id)
+    unknown_encodings.append(face_encoding)
 
-    known_names = [u[2] for u in users]
+    print(f"[recognition] New unknown customer inserted, id={new_unknown_id}")
 
-    known_staff_codes = [u[1] for u in users]
-
-    known_ids = [u[0] for u in users]
-
-    print(f"Loaded {len(users)} staff faces into memory")
+    return "New Customer", (0, 0, 255)
 
 
-def load_unknown_faces():
-
-    global unknown_encodings
-    global unknown_ids
-
-    conn = get_connection()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT id, face_encoding
-        FROM unknown_faces
-    """)
-
-    users = cur.fetchall()
-
-    conn.close()
-
-    unknown_ids = [u[0] for u in users]
-
-    unknown_encodings = [
-        np.array(json.loads(u[1]))
-        for u in users
-    ]
-
-    print(
-        f"Loaded {len(users)} unknown faces into memory"
-    )
-
-
-
-
-
-
+# =============================================================
+# CAMERA STREAMING — gen_frames()
+# Reuses the original streaming structure from the old app.py.
+# Adds the new 3-step recognition logic via _process_face().
+# =============================================================
 
 def gen_frames():
-    global camera
+    global camera, pending_new_faces
 
     while True:
 
-        # camera released while registering
+        # Camera may be temporarily released during registration
         if camera is None:
+            time.sleep(0.05)
             continue
 
         success, frame = camera.read()
 
         if not success:
-            break
+            time.sleep(0.05)
+            continue
 
-        # Convert frame to RGB
+        # Convert BGR frame to RGB for face_recognition
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
+        # Locate all faces in the current frame
         face_locations = face_recognition.face_locations(rgb_frame)
-        face_encodings = face_recognition.face_encodings(
-            rgb_frame,
-            face_locations
-        )
+        face_encodings_list = face_recognition.face_encodings(rgb_frame, face_locations)
 
+        # Expire stale pending-new entries (face left and re-appeared briefly)
+        now = datetime.now()
+        stale_keys = [
+            k for k, v in pending_new_faces.items()
+            if (now - v["first_seen"]).total_seconds() > SETTINGS["pending_expire_seconds"]
+        ]
+        for k in stale_keys:
+            del pending_new_faces[k]
 
+        # Process each detected face
         for (top, right, bottom, left), face_encoding in zip(
-            face_locations,
-            face_encodings
+            face_locations, face_encodings_list
         ):
+            label, color = _process_face(face_encoding)
 
-            name = "Unknown"
-            color = (0, 0, 255)
+            # Draw bounding rectangle
+            cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
 
-            if len(known_encodings) > 0:
-
-                face_distances = face_recognition.face_distance(
-                    known_encodings,
-                    face_encoding
-                )
-
-                best_match_index = np.argmin(face_distances)
-                print("Matched:", known_names[best_match_index])
-                print("Distance:", face_distances[best_match_index])
-
-                if face_distances[best_match_index] < 0.45:
-                    print("GREEN MATCH FOUND")
-
-                    name = (
-                        f"{known_names[best_match_index]}"
-                        f" ({known_staff_codes[best_match_index]})"
-                    )
-
-                    color = (0, 255, 0)
-
-                    staff_id = known_ids[best_match_index]
-
-                    current_time = datetime.now()
-
-                    should_mark = False
-
-                    if staff_id not in attendance_marked:
-
-                        should_mark = True
-
-                    else:
-
-                        seconds = (
-                            current_time -
-                            attendance_marked[staff_id]
-                        ).total_seconds()
-
-                        if seconds > 60:
-                            should_mark = True
-
-                    if should_mark:
-
-                        attendance_marked[staff_id] = current_time
-                        print("Sending staff_id:", staff_id)
-                        print("Sending name:", known_names[best_match_index])
-
-                        response = requests.post(
-                            "https://stafftally.com/api/face-attendance",
-                            json={
-                                "staff_id": staff_id,
-                                "device_name": "Face Recognition Camera 1"
-                            }
-                        )
-                        print("Status Code:", response.status_code)
-                        print("URL:", response.url)
-                        print("Attendance Response:")
-                        print(response.text)
-                        conn_log = get_connection()
-                        cur_log = conn_log.cursor()
-
-                        cur_log.execute(
-                            """
-                            UPDATE staff_faces
-                            SET visit_count = visit_count + 1
-                            WHERE staff_id = ?
-                            """,
-                            (known_ids[best_match_index],)
-                        )
-                        print("staff_id used for update:", known_ids[best_match_index])
-                        print("Rows updated:", cur_log.rowcount)
-
-                        cur_log.execute(
-                            """
-                            INSERT INTO visitor_logs(user_name,status)
-                            VALUES(?,?)
-                            """,
-                            (name, "KNOWN")
-                        )
-
-                        conn_log.commit()
-                        conn_log.close()
-
-                else:
-
-                    found_unknown = False
-
-                    for i, stored_encoding in enumerate(unknown_encodings):
-
-                        distance = face_recognition.face_distance(
-                            [stored_encoding],
-                            face_encoding
-                        )[0]
-
-                        if distance < 0.40:
-
-                            unknown_id = unknown_ids[i] if i < len(unknown_ids) else None
-
-                            current_time = datetime.now()
-
-                            # check if 6 seconds have passed since first seen
-                            if unknown_id in last_yellow_seen:
-                                seconds = (current_time - last_yellow_seen[unknown_id]).total_seconds()
-                                if seconds < 6:
-                                    # still within 6 seconds, keep showing red
-                                    name = "New Unknown"
-                                    color = (0, 0, 255)
-                                else:
-                                    # 6 seconds passed, now show yellow
-                                    print("YELLOW MATCH FOUND")
-                                    name = "Unknown"
-                                    color = (0, 215, 255)
-                            else:
-                                # first time seeing this unknown, start timer
-                                last_yellow_seen[unknown_id] = current_time
-                                name = "New Unknown"
-                                color = (0, 0, 255)
-
-                            found_unknown = True
-                            break
-
-                    if not found_unknown:
-
-                        name = "New Unknown"
-                        color = (0, 0, 255)
-
-                        current_time = datetime.now()
-
-                        # check face doesn't match any known staff
-                        staff_distances = face_recognition.face_distance(
-                            known_encodings,
-                            face_encoding
-                        )
-                        min_staff_distance = np.min(staff_distances) if len(known_encodings) > 0 else 1.0
-
-                        print("Min staff distance:", min_staff_distance)
-
-                        if min_staff_distance > 0.45:
-
-                            conn_unknown_new = get_connection()
-                            cur_unknown_new = conn_unknown_new.cursor()
-
-                            cur_unknown_new.execute("""
-                                INSERT INTO unknown_faces(face_encoding)
-                                VALUES(?)
-                            """,
-                            (json.dumps(face_encoding.tolist()),))
-
-                            cur_unknown_new.execute("""
-                                UPDATE stats
-                                SET unknown_count = unknown_count + 1
-                                WHERE id = 1
-                            """)
-
-                            conn_unknown_new.commit()
-
-                            new_id = cur_unknown_new.lastrowid
-                            unknown_encodings.append(face_encoding)
-                            unknown_ids.append(new_id)
-
-                            conn_unknown_new.close()
-
-                            print("New unknown inserted with id:", new_id)
-                            print("Unknown count updated in stats")
-
-                        else:
-                            print("Skipped — too close to a known staff face")
-
-            cv2.rectangle(
-                frame,
-                (left, top),
-                (right, bottom),
-                color,
-                2
-            )
-
+            # Draw label above the rectangle
             cv2.putText(
                 frame,
-                name,
+                label,
                 (left, top - 10),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.7,
                 color,
-                2
+                2,
             )
 
-        ret, buffer = cv2.imencode('.jpg', frame)
+        # Encode frame as JPEG and yield for streaming
+        ret, buffer = cv2.imencode(".jpg", frame)
+        if not ret:
+            continue
 
-        frame = buffer.tobytes()
+        frame_bytes = buffer.tobytes()
 
         yield (
-            b'--frame\r\n'
-            b'Content-Type: image/jpeg\r\n\r\n'
-            + frame +
-            b'\r\n'
+            b"--frame\r\n"
+            b"Content-Type: image/jpeg\r\n\r\n"
+            + frame_bytes
+            + b"\r\n"
         )
 
 
-@app.route('/video_feed')
+# =============================================================
+# ROUTE — settings page
+# =============================================================
+
+@app.route("/settings")
+def settings_page():
+    """Render the settings configuration page."""
+    return render_template("settings.html")
+
+
+# =============================================================
+# ROUTE — GET /settings  (JSON)
+# Returns the current system_settings row as JSON.
+# =============================================================
+
+@app.route("/api/settings", methods=["GET"])
+def get_settings():
+    """Return current system settings from the in-memory SETTINGS dict."""
+    return jsonify(SETTINGS)
+
+
+# =============================================================
+# ROUTE — POST /settings  (JSON)
+# Accepts a JSON body with any subset of setting keys,
+# persists them to PostgreSQL, then reloads SETTINGS in memory.
+# No server restart required.
+# =============================================================
+
+@app.route("/api/settings", methods=["POST"])
+def update_settings():
+    """
+    Update system_settings row id=1 in PostgreSQL.
+    Accepts JSON: { new_face_delay, cooldown_seconds, pending_expire_seconds,
+                    known_threshold, unknown_threshold,
+                    dashboard_refresh_seconds, auto_delete_logs_days }
+    All fields are optional; only provided fields are updated.
+    """
+    data = request.json
+    if not data:
+        return jsonify({"success": False, "message": "No data provided."}), 400
+
+    # Allowed fields and their Python types for validation
+    allowed: dict = {
+        "new_face_delay":           float,
+        "cooldown_seconds":         float,
+        "pending_expire_seconds":   float,
+        "known_threshold":          float,
+        "unknown_threshold":        float,
+        "dashboard_refresh_seconds":int,
+        "auto_delete_logs_days":    int,
+    }
+
+    updates = {}
+    errors  = []
+
+    for key, cast in allowed.items():
+        if key in data:
+            try:
+                updates[key] = cast(data[key])
+            except (ValueError, TypeError):
+                errors.append(f"'{key}' must be a valid {cast.__name__}.")
+
+    if errors:
+        return jsonify({"success": False, "message": " ".join(errors)}), 400
+
+    if not updates:
+        return jsonify({"success": False, "message": "No recognised fields provided."}), 400
+
+    # Build a safe SET clause using column names we control (no user input in SQL)
+    set_clause = ", ".join(f"{col} = %s" for col in updates)
+    values     = list(updates.values()) + [1]   # id = 1
+
+    try:
+        conn = get_connection()
+        cur  = conn.cursor()
+        cur.execute(
+            f"UPDATE system_settings SET {set_clause}, updated_at = NOW() WHERE id = %s",
+            values,
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as exc:
+        return jsonify({"success": False, "message": f"Database error: {exc}"}), 500
+
+    # Reload SETTINGS in memory — no restart required
+    reload_system_settings()
+
+    return jsonify({"success": True, "message": "Settings saved.", "settings": SETTINGS})
+
+
+# =============================================================
+# ROUTE — video feed
+# =============================================================
+
+@app.route("/video_feed")
 def video_feed():
-    return Response(gen_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+    return Response(
+        gen_frames(),
+        mimetype="multipart/x-mixed-replace; boundary=frame",
+    )
 
 
+# =============================================================
+# ADMIN PANEL — page route
+# /settings is kept as a redirect so existing links still work.
+# =============================================================
 
-@app.route('/pause-camera')
-def pause_camera():
-    global camera
-
-    if camera is not None:
-        camera.release()
-
-    return "paused"
-
-
-@app.route('/resume-camera')
-def resume_camera():
-    global camera
-
-    camera = cv2.VideoCapture(0)
-
-    return "resumed"
+@app.route("/admin")
+def admin_panel():
+    """Render the full Admin Panel SPA."""
+    return render_template("admin.html")
 
 
+@app.route("/settings")
+def settings_redirect():
+    """Backward-compatible redirect — old /settings links go to admin."""
+    from flask import redirect
+    return redirect("/admin")
 
 
-def delete_old_logs():
+# =============================================================
+# ADMIN API — helper: paginate a list
+# =============================================================
 
-    conn = get_connection()
-    cur = conn.cursor()
-
-    cutoff_date = (
-        datetime.now() - timedelta(days=3)
-    ).strftime("%Y-%m-%d %H:%M:%S")
-
-    print("Deleting logs before:", cutoff_date)
-
-    cur.execute("""
-    DELETE FROM visitor_logs
-    WHERE visit_time < ?
-    """, (cutoff_date,))
-
-    print("Deleted Rows:", cur.rowcount)
-
-    conn.commit()
-    conn.close()
+def _paginate(rows: list, page: int, per_page: int) -> dict:
+    """
+    Slice *rows* and return a dict with pagination metadata.
+    """
+    total      = len(rows)
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    page        = max(1, min(page, total_pages))
+    start       = (page - 1) * per_page
+    end         = start + per_page
+    return {
+        "items":       rows[start:end],
+        "total":       total,
+        "page":        page,
+        "per_page":    per_page,
+        "total_pages": total_pages,
+    }
 
 
+# =============================================================
+# ADMIN API — Registered Customers
+# GET  /api/admin/customers          — paginated + search + sort
+# PUT  /api/admin/customers/<id>     — edit name / email / phone
+# DELETE /api/admin/customers/<id>   — delete + purge cache
+# =============================================================
+
+@app.route("/api/admin/customers", methods=["GET"])
+def admin_list_customers():
+    """
+    Query params:
+      search   — substring match on name / email / phone
+      sort     — column: id | name | visit_count | last_seen  (default: name)
+      order    — asc | desc  (default: asc)
+      page     — int (default: 1)
+      per_page — int (default: 20)
+    """
+    search   = request.args.get("search", "").strip()
+    sort_col = request.args.get("sort",     "name")
+    order    = request.args.get("order",    "asc").lower()
+    page     = int(request.args.get("page",     1))
+    per_page = int(request.args.get("per_page", 20))
+
+    # Whitelist sort columns to prevent SQL injection
+    allowed_sort = {"id", "name", "visit_count", "last_seen", "created_at"}
+    if sort_col not in allowed_sort:
+        sort_col = "name"
+    direction = "DESC" if order == "desc" else "ASC"
+
+    try:
+        conn = get_connection()
+        cur  = conn.cursor()
+
+        if search:
+            pattern = f"%{search}%"
+            cur.execute(
+                f"""
+                SELECT id, name, email, phone, visit_count, created_at, last_seen
+                FROM customers
+                WHERE name ILIKE %s OR email ILIKE %s OR phone ILIKE %s
+                ORDER BY {sort_col} {direction}
+                """,
+                (pattern, pattern, pattern),
+            )
+        else:
+            cur.execute(
+                f"""
+                SELECT id, name, email, phone, visit_count, created_at, last_seen
+                FROM customers
+                ORDER BY {sort_col} {direction}
+                """
+            )
+
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+    except Exception as exc:
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+    items = [
+        {
+            "id":          r[0],
+            "name":        r[1],
+            "email":       r[2] or "",
+            "phone":       r[3] or "",
+            "visit_count": r[4],
+            "created_at":  r[5].strftime("%Y-%m-%d %H:%M") if r[5] else "",
+            "last_seen":   r[6].strftime("%Y-%m-%d %H:%M") if r[6] else "",
+        }
+        for r in rows
+    ]
+
+    return jsonify({"success": True, **_paginate(items, page, per_page)})
+
+
+@app.route("/api/admin/customers/<int:customer_id>", methods=["PUT"])
+def admin_edit_customer(customer_id):
+    """
+    Edit name, email, or phone for a registered customer.
+    Accepts JSON: { name?, email?, phone? }
+    """
+    data = request.json or {}
+    allowed = {"name", "email", "phone"}
+    updates = {k: v.strip() for k, v in data.items() if k in allowed and isinstance(v, str)}
+
+    if not updates:
+        return jsonify({"success": False, "message": "No valid fields provided."}), 400
+
+    if "name" in updates and not updates["name"]:
+        return jsonify({"success": False, "message": "Name cannot be blank."}), 400
+
+    set_clause = ", ".join(f"{col} = %s" for col in updates)
+    values     = list(updates.values()) + [customer_id]
+
+    try:
+        conn = get_connection()
+        cur  = conn.cursor()
+        cur.execute(
+            f"UPDATE customers SET {set_clause} WHERE id = %s",
+            values,
+        )
+        affected = cur.rowcount
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as exc:
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+    if affected == 0:
+        return jsonify({"success": False, "message": "Customer not found."}), 404
+
+    # Refresh name in the in-memory cache if the name changed
+    if "name" in updates:
+        for i, cid in enumerate(known_ids):
+            if cid == customer_id:
+                known_names[i] = updates["name"]
+                break
+
+    return jsonify({"success": True, "message": "Customer updated."})
+
+
+@app.route("/api/admin/customers/<int:customer_id>", methods=["DELETE"])
+def admin_delete_customer(customer_id):
+    """
+    Delete a registered customer, their visit logs, and evict them from
+    the in-memory recognition cache immediately.
+    """
+    try:
+        conn = get_connection()
+        cur  = conn.cursor()
+        cur.execute(
+            "DELETE FROM visit_logs WHERE customer_type = 'known' AND customer_id = %s",
+            (customer_id,),
+        )
+        cur.execute("DELETE FROM customers WHERE id = %s", (customer_id,))
+        affected = cur.rowcount
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as exc:
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+    if affected == 0:
+        return jsonify({"success": False, "message": "Customer not found."}), 404
+
+    # Evict from RAM cache without a full reload
+    global known_ids, known_names, known_encodings
+    if customer_id in known_ids:
+        idx = known_ids.index(customer_id)
+        known_ids.pop(idx)
+        known_names.pop(idx)
+        known_encodings.pop(idx)
+
+    return jsonify({"success": True, "message": f"Customer {customer_id} deleted."})
+
+
+# =============================================================
+# ADMIN API — Unknown Customers
+# GET    /api/admin/unknown-customers         — paginated + search
+# DELETE /api/admin/unknown-customers/<id>    — delete one
+# DELETE /api/admin/unknown-customers         — delete all
+# =============================================================
+
+@app.route("/api/admin/unknown-customers", methods=["GET"])
+def admin_list_unknown():
+    """
+    Query params: search (matches id), sort, order, page, per_page
+    """
+    search   = request.args.get("search", "").strip()
+    sort_col = request.args.get("sort",     "id")
+    order    = request.args.get("order",    "desc").lower()
+    page     = int(request.args.get("page",     1))
+    per_page = int(request.args.get("per_page", 20))
+
+    allowed_sort = {"id", "visit_count", "first_seen", "last_seen"}
+    if sort_col not in allowed_sort:
+        sort_col = "id"
+    direction = "DESC" if order == "desc" else "ASC"
+
+    try:
+        conn = get_connection()
+        cur  = conn.cursor()
+
+        if search:
+            cur.execute(
+                f"""
+                SELECT id, visit_count, first_seen, last_seen
+                FROM unknown_customers
+                WHERE id::text ILIKE %s
+                ORDER BY {sort_col} {direction}
+                """,
+                (f"%{search}%",),
+            )
+        else:
+            cur.execute(
+                f"""
+                SELECT id, visit_count, first_seen, last_seen
+                FROM unknown_customers
+                ORDER BY {sort_col} {direction}
+                """
+            )
+
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+    except Exception as exc:
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+    items = [
+        {
+            "id":          r[0],
+            "visit_count": r[1],
+            "first_seen":  r[2].strftime("%Y-%m-%d %H:%M") if r[2] else "",
+            "last_seen":   r[3].strftime("%Y-%m-%d %H:%M") if r[3] else "",
+        }
+        for r in rows
+    ]
+
+    return jsonify({"success": True, **_paginate(items, page, per_page)})
+
+
+@app.route("/api/admin/unknown-customers/<int:unknown_id>", methods=["DELETE"])
+def admin_delete_unknown(unknown_id):
+    """Delete one unknown customer and their visit logs; evict from cache."""
+    try:
+        conn = get_connection()
+        cur  = conn.cursor()
+        cur.execute(
+            "DELETE FROM visit_logs "
+            "WHERE customer_type IN ('unknown','returning_unknown') AND customer_id = %s",
+            (unknown_id,),
+        )
+        cur.execute("DELETE FROM unknown_customers WHERE id = %s", (unknown_id,))
+        affected = cur.rowcount
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as exc:
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+    if affected == 0:
+        return jsonify({"success": False, "message": "Unknown customer not found."}), 404
+
+    # Evict from RAM
+    global unknown_ids, unknown_encodings
+    if unknown_id in unknown_ids:
+        idx = unknown_ids.index(unknown_id)
+        unknown_ids.pop(idx)
+        unknown_encodings.pop(idx)
+
+    return jsonify({"success": True, "message": f"Unknown customer {unknown_id} deleted."})
+
+
+@app.route("/api/admin/unknown-customers", methods=["DELETE"])
+def admin_delete_all_unknown():
+    """Delete ALL unknown customers and their visit logs; clear cache."""
+    try:
+        conn = get_connection()
+        cur  = conn.cursor()
+        cur.execute(
+            "DELETE FROM visit_logs WHERE customer_type IN ('unknown','returning_unknown')"
+        )
+        cur.execute("DELETE FROM unknown_customers")
+        deleted = cur.rowcount
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as exc:
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+    # Clear RAM cache for unknowns
+    global unknown_ids, unknown_encodings
+    unknown_ids       = []
+    unknown_encodings = []
+
+    return jsonify({"success": True, "message": f"Deleted {deleted} unknown customer(s)."})
+
+
+# =============================================================
+# ADMIN API — Visit Logs
+# GET    /api/admin/visit-logs             — paginated, filterable
+# DELETE /api/admin/visit-logs/delete-old  — remove logs older than N days
+# =============================================================
+
+@app.route("/api/admin/visit-logs", methods=["GET"])
+def admin_list_logs():
+    """
+    Query params:
+      type      — known | unknown | returning_unknown | '' (all)
+      date_from — YYYY-MM-DD
+      date_to   — YYYY-MM-DD
+      search    — substring on customer_id or resolved name
+      page, per_page
+    """
+    filter_type = request.args.get("type",      "").strip()
+    date_from   = request.args.get("date_from", "").strip()
+    date_to     = request.args.get("date_to",   "").strip()
+    search      = request.args.get("search",    "").strip()
+    page        = int(request.args.get("page",     1))
+    per_page    = int(request.args.get("per_page", 30))
+
+    conditions = []
+    params     = []
+
+    if filter_type in ("known", "unknown", "returning_unknown"):
+        conditions.append("vl.customer_type = %s")
+        params.append(filter_type)
+
+    if date_from:
+        conditions.append("vl.visit_time >= %s")
+        params.append(date_from)
+
+    if date_to:
+        conditions.append("vl.visit_time <= %s")
+        params.append(date_to + " 23:59:59")
+
+    if search:
+        conditions.append(
+            "(vl.customer_id::text ILIKE %s OR c.name ILIKE %s)"
+        )
+        params += [f"%{search}%", f"%{search}%"]
+
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+    try:
+        conn = get_connection()
+        cur  = conn.cursor()
+        cur.execute(
+            f"""
+            SELECT
+                vl.id,
+                vl.customer_type,
+                vl.customer_id,
+                vl.visit_time,
+                COALESCE(c.name, 'Unknown #' || vl.customer_id::text) AS display_name
+            FROM visit_logs vl
+            LEFT JOIN customers c
+                ON vl.customer_type = 'known' AND c.id = vl.customer_id
+            {where}
+            ORDER BY vl.id DESC
+            """,
+            params,
+        )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+    except Exception as exc:
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+    items = [
+        {
+            "id":            r[0],
+            "customer_type": r[1],
+            "customer_id":   r[2],
+            "visit_time":    r[3].strftime("%Y-%m-%d %H:%M:%S") if r[3] else "",
+            "name":          r[4],
+        }
+        for r in rows
+    ]
+
+    return jsonify({"success": True, **_paginate(items, page, per_page)})
+
+
+@app.route("/api/admin/visit-logs/delete-old", methods=["DELETE"])
+def admin_delete_old_logs():
+    """
+    Delete visit logs older than `days` days.
+    JSON body: { days: int }
+    """
+    data = request.json or {}
+    try:
+        days = int(data.get("days", SETTINGS["auto_delete_logs_days"]))
+    except (ValueError, TypeError):
+        return jsonify({"success": False, "message": "Invalid days value."}), 400
+
+    cutoff = datetime.now() - timedelta(days=days)
+
+    try:
+        conn = get_connection()
+        cur  = conn.cursor()
+        cur.execute("DELETE FROM visit_logs WHERE visit_time < %s", (cutoff,))
+        deleted = cur.rowcount
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as exc:
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+    return jsonify({"success": True, "message": f"Deleted {deleted} log(s) older than {days} day(s)."})
+
+
+# =============================================================
+# ADMIN API — Database Overview
+# GET /api/admin/database-overview
+# =============================================================
+
+@app.route("/api/admin/database-overview", methods=["GET"])
+def admin_database_overview():
+    """Return table counts, today's stats, and in-memory cache sizes."""
+    today = datetime.now().date().isoformat()
+
+    try:
+        conn = get_connection()
+        cur  = conn.cursor()
+
+        cur.execute("SELECT COUNT(*) FROM customers")
+        total_customers = cur.fetchone()[0]
+
+        cur.execute("SELECT COUNT(*) FROM unknown_customers")
+        total_unknown = cur.fetchone()[0]
+
+        cur.execute("SELECT COUNT(*) FROM visit_logs")
+        total_logs = cur.fetchone()[0]
+
+        cur.execute(
+            "SELECT known_today, unknown_today, returning_unknown_today "
+            "FROM daily_statistics WHERE stat_date = %s",
+            (today,),
+        )
+        today_row = cur.fetchone()
+
+        # PostgreSQL database size
+        cur.execute("SELECT pg_size_pretty(pg_database_size(current_database()))")
+        db_size = cur.fetchone()[0]
+
+        cur.close()
+        conn.close()
+    except Exception as exc:
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+    return jsonify({
+        "success":           True,
+        "total_customers":   total_customers,
+        "total_unknown":     total_unknown,
+        "total_logs":        total_logs,
+        "known_today":       today_row[0] if today_row else 0,
+        "unknown_today":     today_row[1] if today_row else 0,
+        "returning_today":   today_row[2] if today_row else 0,
+        "db_size":           db_size,
+        "cache_known":       len(known_ids),
+        "cache_unknown":     len(unknown_ids),
+    })
+
+
+@app.route("/api/admin/cache/refresh", methods=["POST"])
+def admin_refresh_cache():
+    """Reload both face caches from PostgreSQL."""
+    try:
+        refresh_face_cache()
+        return jsonify({
+            "success": True,
+            "message": "Face cache refreshed.",
+            "cache_known":   len(known_ids),
+            "cache_unknown": len(unknown_ids),
+        })
+    except Exception as exc:
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+
+@app.route("/api/admin/settings/reset-defaults", methods=["POST"])
+def admin_reset_settings_defaults():
+    """
+    Write _SETTINGS_DEFAULTS back to PostgreSQL and reload in memory.
+    """
+    d = _SETTINGS_DEFAULTS
+    try:
+        conn = get_connection()
+        cur  = conn.cursor()
+        cur.execute(
+            """
+            UPDATE system_settings SET
+                new_face_delay           = %s,
+                cooldown_seconds         = %s,
+                pending_expire_seconds   = %s,
+                known_threshold          = %s,
+                unknown_threshold        = %s,
+                dashboard_refresh_seconds = %s,
+                auto_delete_logs_days    = %s,
+                updated_at               = NOW()
+            WHERE id = 1
+            """,
+            (
+                d["new_face_delay"],
+                d["cooldown_seconds"],
+                d["pending_expire_seconds"],
+                d["known_threshold"],
+                d["unknown_threshold"],
+                d["dashboard_refresh_seconds"],
+                d["auto_delete_logs_days"],
+            ),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as exc:
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+    reload_system_settings()
+    return jsonify({"success": True, "message": "Settings reset to defaults.", "settings": SETTINGS})
+
+
+# =============================================================
+# ADMIN API — System Information
+# GET /api/admin/system-info
+# =============================================================
+
+@app.route("/api/admin/system-info", methods=["GET"])
+def admin_system_info():
+    """
+    Return runtime environment details — versions, uptime, statuses.
+    All lookups are try/except guarded so a missing library never crashes.
+    """
+    import sys
+    import flask
+    import psycopg
+
+    # Python version
+    py_version = sys.version.split(" ")[0]
+
+    # Library versions
+    flask_version   = flask.__version__
+    cv2_version     = cv2.__version__
+    numpy_version   = np.__version__
+
+    try:
+        import face_recognition as _fr
+        fr_version = getattr(_fr, "__version__", "installed")
+    except Exception:
+        fr_version = "unknown"
+
+    # PostgreSQL version
+    pg_version = "unknown"
+    db_status  = "error"
+    try:
+        conn = get_connection()
+        cur  = conn.cursor()
+        cur.execute("SELECT version()")
+        pg_version = cur.fetchone()[0].split(",")[0]   # e.g. "PostgreSQL 15.3 …"
+        cur.close()
+        conn.close()
+        db_status = "connected"
+    except Exception as exc:
+        pg_version = str(exc)
+
+    # Uptime
+    uptime_delta   = datetime.now() - APP_START_TIME
+    total_seconds  = int(uptime_delta.total_seconds())
+    hours, rem     = divmod(total_seconds, 3600)
+    minutes, secs  = divmod(rem, 60)
+    uptime_str     = f"{hours}h {minutes}m {secs}s"
+
+    # Camera status
+    cam_status = "active" if camera is not None and camera.isOpened() else "inactive"
+
+    # Recognition cache
+    cache_status = f"{len(known_ids)} known, {len(unknown_ids)} unknown loaded"
+
+    return jsonify({
+        "success":        True,
+        "python":         py_version,
+        "flask":          flask_version,
+        "opencv":         cv2_version,
+        "numpy":          numpy_version,
+        "face_recognition": fr_version,
+        "postgresql":     pg_version,
+        "uptime":         uptime_str,
+        "app_start":      APP_START_TIME.strftime("%Y-%m-%d %H:%M:%S"),
+        "db_status":      db_status,
+        "camera_status":  cam_status,
+        "cache_status":   cache_status,
+        "cache_known":    len(known_ids),
+        "cache_unknown":  len(unknown_ids),
+    })
+
+
+# =============================================================
+# ENTRY POINT
+# =============================================================
 
 if __name__ == "__main__":
 
+    # Clean up stale logs on startup
     delete_old_logs()
 
-    print("Syncing Staff Faces...")
-    sync_staff_faces()
-
+    # Load all faces into RAM before accepting requests
     refresh_face_cache()
 
     app.run(
         host="0.0.0.0",
-        port=5000,
-        debug=True
+        port=int(os.environ.get("PORT", 5000)),
+        debug=os.environ.get("FLASK_DEBUG", "true").lower() == "true",
     )
-

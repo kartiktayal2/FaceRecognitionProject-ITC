@@ -1,360 +1,1604 @@
 <!DOCTYPE html>
 <html lang="en">
+
+<!-- ============================================================
+     ITC Customer Analytics — Dashboard
+     Flask + PostgreSQL + Face Recognition
+     
+     Consumes: GET /dashboard-data
+     Posts to:  POST /register-camera
+     Streams:   /video_feed
+     Controls:  /pause-camera  /resume-camera
+     ============================================================ -->
+
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Face Recognition Dashboard</title>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ITC Customer Analytics</title>
+
+  <!-- ── Google Fonts ───────────────────────────────────────── -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+
+  <!-- ── Tailwind (browser build) ───────────────────────────── -->
   <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <!-- ── Chart.js ───────────────────────────────────────────── -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+
+  <!-- ================================================================
+       DESIGN TOKENS
+       All colours and values live here — edit once, changes everywhere.
+       ================================================================ -->
+  <style>
+    /* ── Palette ───────────────────────────────────────────────── */
+    :root {
+      --bg-base:        #0D1117;   /* page background                */
+      --bg-surface:     #161B22;   /* card / panel background        */
+      --bg-elevated:    #21262D;   /* table header / input bg        */
+      --border:         #30363D;   /* dividers and outlines          */
+
+      --accent-teal:    #00D4AA;   /* primary — recognition "lock"   */
+      --accent-amber:   #F0B429;   /* secondary — unknown / alert    */
+      --accent-red:     #EF4444;   /* danger / unknown badge         */
+      --accent-green:   #22C55E;   /* known badge                    */
+
+      --text-primary:   #E6EDF3;   /* headings                       */
+      --text-secondary: #8B949E;   /* labels / muted copy            */
+      --text-data:      #00D4AA;   /* live counter numbers           */
+
+      /* ── Typography ─────────────────────────────────────────── */
+      --font-ui:        'Inter', system-ui, sans-serif;
+      --font-data:      'JetBrains Mono', 'Fira Code', monospace;
+
+      /* ── Motion ─────────────────────────────────────────────── */
+      --ease:           cubic-bezier(0.4, 0, 0.2, 1);
+      --duration-fast:  150ms;
+      --duration-med:   300ms;
+    }
+
+    /* ── Base reset ─────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: var(--font-ui);
+      background-color: var(--bg-base);
+      color: var(--text-primary);
+      min-height: 100vh;
+      line-height: 1.5;
+    }
+
+    /* ── Scrollbar ──────────────────────────────────────────────── */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: var(--bg-base); }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+    /* ═══════════════════════════════════════════════════════════════
+       NAVBAR
+       ═══════════════════════════════════════════════════════════════ */
+    .navbar {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: var(--bg-surface);
+      border-bottom: 1px solid var(--border);
+      backdrop-filter: blur(8px);
+      padding: 0 1.5rem;
+      height: 60px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .navbar-brand {
+      display: flex;
+      align-items: center;
+      gap: 0.625rem;
+      text-decoration: none;
+    }
+
+    .navbar-brand-icon {
+      width: 32px;
+      height: 32px;
+      background: var(--accent-teal);
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .navbar-brand-name {
+      font-weight: 700;
+      font-size: 0.9375rem;
+      letter-spacing: -0.01em;
+      color: var(--text-primary);
+    }
+
+    .navbar-brand-name span {
+      color: var(--accent-teal);
+    }
+
+    .navbar-actions {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    /* ── Buttons ─────────────────────────────────────────────────── */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.375rem;
+      padding: 0.4375rem 0.875rem;
+      border-radius: 6px;
+      font-size: 0.8125rem;
+      font-weight: 600;
+      font-family: var(--font-ui);
+      cursor: pointer;
+      border: 1px solid transparent;
+      transition: background var(--duration-fast) var(--ease),
+                  border-color var(--duration-fast) var(--ease),
+                  opacity var(--duration-fast) var(--ease);
+      text-decoration: none;
+      white-space: nowrap;
+    }
+
+    .btn-primary {
+      background: var(--accent-teal);
+      color: #0D1117;
+      border-color: var(--accent-teal);
+    }
+    .btn-primary:hover { background: #00bfa0; border-color: #00bfa0; }
+
+    .btn-secondary {
+      background: transparent;
+      color: var(--text-secondary);
+      border-color: var(--border);
+    }
+    .btn-secondary:hover { background: var(--bg-elevated); color: var(--text-primary); }
+
+    .btn-ghost {
+      background: transparent;
+      color: var(--text-secondary);
+      border-color: transparent;
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    /* ═══════════════════════════════════════════════════════════════
+       PAGE LAYOUT
+       ═══════════════════════════════════════════════════════════════ */
+    .page-wrapper {
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 1.5rem;
+    }
+
+    .section-title {
+      font-size: 0.6875rem;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--text-secondary);
+      margin-bottom: 0.875rem;
+    }
+
+    /* ═══════════════════════════════════════════════════════════════
+       ANALYTICS CARDS
+       ═══════════════════════════════════════════════════════════════ */
+    .cards-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }
+
+    @media (max-width: 900px) {
+      .cards-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 500px) {
+      .cards-grid { grid-template-columns: 1fr 1fr; }
+    }
+
+    .stat-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.25rem;
+      position: relative;
+      overflow: hidden;
+      transition: border-color var(--duration-fast) var(--ease),
+                  transform var(--duration-fast) var(--ease);
+    }
+
+    .stat-card:hover {
+      border-color: var(--accent-teal);
+      transform: translateY(-2px);
+    }
+
+    /* Left accent bar — the signature element */
+    .stat-card::before {
+      content: '';
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: 3px;
+      border-radius: 10px 0 0 10px;
+      background: var(--card-accent, var(--accent-teal));
+      transition: box-shadow var(--duration-med) var(--ease);
+    }
+
+    /* Pulse the accent bar when a value updates */
+    .stat-card.pulse::before {
+      box-shadow: 0 0 10px 3px var(--card-accent, var(--accent-teal));
+    }
+
+    .stat-card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 0.875rem;
+    }
+
+    .stat-card-label {
+      font-size: 0.75rem;
+      font-weight: 500;
+      color: var(--text-secondary);
+      letter-spacing: 0.02em;
+    }
+
+    .stat-card-icon {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      background: color-mix(in srgb, var(--card-accent, var(--accent-teal)) 12%, transparent);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .stat-card-icon svg {
+      width: 16px;
+      height: 16px;
+      stroke: var(--card-accent, var(--accent-teal));
+      fill: none;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .stat-card-value {
+      font-family: var(--font-data);
+      font-size: 2rem;
+      font-weight: 600;
+      color: var(--card-accent, var(--accent-teal));
+      line-height: 1;
+      margin-bottom: 0.25rem;
+      /* smooth counter animation handled in JS via requestAnimationFrame */
+      transition: opacity var(--duration-fast) var(--ease);
+    }
+
+    .stat-card-sub {
+      font-size: 0.6875rem;
+      color: var(--text-secondary);
+    }
+
+    /* ═══════════════════════════════════════════════════════════════
+       MAIN GRID — chart + camera
+       ═══════════════════════════════════════════════════════════════ */
+    .main-grid {
+      display: grid;
+      grid-template-columns: 1fr 340px;
+      gap: 1rem;
+      margin-bottom: 1rem;
+    }
+
+    @media (max-width: 1024px) {
+      .main-grid { grid-template-columns: 1fr; }
+    }
+
+    /* ═══════════════════════════════════════════════════════════════
+       PANEL (shared card shell)
+       ═══════════════════════════════════════════════════════════════ */
+    .panel {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+
+    .panel-header {
+      padding: 0.875rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--bg-elevated);
+    }
+
+    .panel-title {
+      font-size: 0.8125rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--text-primary);
+    }
+
+    .panel-body {
+      padding: 1.25rem;
+    }
+
+    /* ═══════════════════════════════════════════════════════════════
+       LIVE CAMERA
+       ═══════════════════════════════════════════════════════════════ */
+    .camera-container {
+      position: relative;
+    }
+
+    .camera-feed {
+      width: 100%;
+      border-radius: 6px;
+      display: block;
+      object-fit: cover;
+      background: #000;
+      min-height: 200px;
+    }
+
+    .camera-live-badge {
+      position: absolute;
+      top: 0.625rem;
+      left: 0.625rem;
+      display: flex;
+      align-items: center;
+      gap: 0.375rem;
+      background: rgba(13,17,23,0.8);
+      backdrop-filter: blur(4px);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 0.25rem 0.625rem;
+      font-size: 0.6875rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      color: var(--accent-green);
+    }
+
+    /* pulsing green dot */
+    .live-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--accent-green);
+      animation: live-pulse 1.4s ease-in-out infinite;
+    }
+
+    @keyframes live-pulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(34,197,94,0.6); }
+      50%       { box-shadow: 0 0 0 5px rgba(34,197,94,0); }
+    }
+
+    /* ═══════════════════════════════════════════════════════════════
+       CHART
+       ═══════════════════════════════════════════════════════════════ */
+    .chart-wrapper {
+      position: relative;
+      height: 240px;
+    }
+
+    /* ═══════════════════════════════════════════════════════════════
+       BOTTOM GRID — tables
+       ═══════════════════════════════════════════════════════════════ */
+    .bottom-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      margin-top: 1rem;
+    }
+
+    @media (max-width: 768px) {
+      .bottom-grid { grid-template-columns: 1fr; }
+    }
+
+    /* ── Data Tables ─────────────────────────────────────────────── */
+    .data-table-wrapper {
+      max-height: 320px;
+      overflow-y: auto;
+    }
+
+    .data-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.8125rem;
+    }
+
+    .data-table thead th {
+      position: sticky;
+      top: 0;
+      background: var(--bg-elevated);
+      padding: 0.625rem 1rem;
+      text-align: left;
+      font-size: 0.6875rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-secondary);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .data-table tbody tr {
+      border-bottom: 1px solid var(--border);
+      transition: background var(--duration-fast) var(--ease);
+    }
+
+    .data-table tbody tr:last-child { border-bottom: none; }
+
+    .data-table tbody tr:hover { background: var(--bg-elevated); }
+
+    .data-table td {
+      padding: 0.75rem 1rem;
+      vertical-align: middle;
+      color: var(--text-primary);
+    }
+
+    .data-table .rank {
+      font-family: var(--font-data);
+      font-size: 0.6875rem;
+      color: var(--text-secondary);
+      width: 2.5rem;
+    }
+
+    .data-table .count-cell {
+      font-family: var(--font-data);
+      font-size: 0.875rem;
+      font-weight: 600;
+      color: var(--accent-teal);
+    }
+
+    /* ── Visit-count bar inside top-customers table ─────────────── */
+    .visit-bar-wrapper {
+      display: flex;
+      align-items: center;
+      gap: 0.625rem;
+    }
+
+    .visit-bar {
+      flex: 1;
+      height: 4px;
+      background: var(--bg-elevated);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+
+    .visit-bar-fill {
+      height: 100%;
+      background: var(--accent-teal);
+      border-radius: 2px;
+      transition: width 0.4s var(--ease);
+    }
+
+    /* ── Status badges ───────────────────────────────────────────── */
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
+      padding: 0.2rem 0.5rem;
+      border-radius: 4px;
+      font-size: 0.6875rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+    }
+
+    .badge-known {
+      background: rgba(34,197,94,0.12);
+      color: var(--accent-green);
+      border: 1px solid rgba(34,197,94,0.25);
+    }
+
+    .badge-unknown {
+      background: rgba(239,68,68,0.12);
+      color: var(--accent-red);
+      border: 1px solid rgba(239,68,68,0.25);
+    }
+
+    .badge-returning {
+      background: rgba(240,180,41,0.12);
+      color: var(--accent-amber);
+      border: 1px solid rgba(240,180,41,0.25);
+    }
+
+    .badge-dot {
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+
+    .time-cell {
+      font-family: var(--font-data);
+      font-size: 0.6875rem;
+      color: var(--text-secondary);
+      white-space: nowrap;
+    }
+
+    /* ── Empty state ─────────────────────────────────────────────── */
+    .empty-state {
+      padding: 2.5rem 1rem;
+      text-align: center;
+      color: var(--text-secondary);
+      font-size: 0.8125rem;
+    }
+
+    /* ═══════════════════════════════════════════════════════════════
+       REGISTER MODAL
+       ═══════════════════════════════════════════════════════════════ */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.7);
+      backdrop-filter: blur(4px);
+      z-index: 200;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 1rem;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity var(--duration-med) var(--ease);
+    }
+
+    .modal-backdrop.is-open {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .modal {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      width: 100%;
+      max-width: 440px;
+      transform: translateY(12px);
+      transition: transform var(--duration-med) var(--ease);
+    }
+
+    .modal-backdrop.is-open .modal {
+      transform: translateY(0);
+    }
+
+    .modal-header {
+      padding: 1.25rem;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .modal-title {
+      font-size: 0.9375rem;
+      font-weight: 700;
+      color: var(--text-primary);
+    }
+
+    .modal-close {
+      background: none;
+      border: none;
+      color: var(--text-secondary);
+      cursor: pointer;
+      padding: 0.25rem;
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      transition: color var(--duration-fast) var(--ease);
+    }
+    .modal-close:hover { color: var(--text-primary); }
+    .modal-close svg { width: 18px; height: 18px; }
+
+    .modal-body { padding: 1.25rem; }
+
+    .form-group { margin-bottom: 0.875rem; }
+
+    .form-label {
+      display: block;
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--text-secondary);
+      margin-bottom: 0.375rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .form-input {
+      width: 100%;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.5625rem 0.75rem;
+      font-size: 0.875rem;
+      font-family: var(--font-ui);
+      color: var(--text-primary);
+      outline: none;
+      transition: border-color var(--duration-fast) var(--ease);
+    }
+
+    .form-input:focus { border-color: var(--accent-teal); }
+    .form-input::placeholder { color: var(--text-secondary); }
+
+    .camera-preview-wrapper {
+      position: relative;
+      background: #000;
+      border-radius: 6px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      margin-bottom: 0.875rem;
+      aspect-ratio: 4/3;
+    }
+
+    #registerVideo {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+
+    #registerCanvas { display: none; }
+
+    /* Capture overlay flash */
+    .capture-flash {
+      position: absolute;
+      inset: 0;
+      background: white;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 80ms;
+    }
+
+    .capture-flash.flash { opacity: 0.6; }
+
+    /* Capture checkmark indicator */
+    .capture-badge {
+      position: absolute;
+      bottom: 0.5rem;
+      right: 0.5rem;
+      background: var(--accent-green);
+      color: #000;
+      font-size: 0.6875rem;
+      font-weight: 700;
+      padding: 0.25rem 0.5rem;
+      border-radius: 4px;
+      display: none;
+    }
+
+    .capture-badge.is-visible { display: block; }
+
+    .modal-footer {
+      padding: 1rem 1.25rem;
+      border-top: 1px solid var(--border);
+      display: flex;
+      gap: 0.5rem;
+      justify-content: flex-end;
+    }
+
+    .btn-full { flex: 1; justify-content: center; }
+
+    /* ── Toast ───────────────────────────────────────────────────── */
+    .toast-container {
+      position: fixed;
+      bottom: 1.5rem;
+      right: 1.5rem;
+      z-index: 300;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .toast {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.75rem 1rem;
+      font-size: 0.8125rem;
+      color: var(--text-primary);
+      display: flex;
+      align-items: center;
+      gap: 0.625rem;
+      min-width: 260px;
+      max-width: 360px;
+      animation: toast-in 0.25s var(--ease) forwards;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    }
+
+    .toast-icon {
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.625rem;
+      font-weight: 700;
+    }
+
+    .toast-success .toast-icon { background: rgba(34,197,94,0.2); color: var(--accent-green); }
+    .toast-error .toast-icon   { background: rgba(239,68,68,0.2); color: var(--accent-red); }
+
+    .toast-message { flex: 1; line-height: 1.4; }
+
+    @keyframes toast-in {
+      from { opacity: 0; transform: translateX(16px); }
+      to   { opacity: 1; transform: translateX(0); }
+    }
+
+    /* ── Spinner for submit button ───────────────────────────────── */
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner {
+      width: 14px;
+      height: 14px;
+      border: 2px solid rgba(13,17,23,0.3);
+      border-top-color: #0D1117;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+
+    /* ── Reduced motion ──────────────────────────────────────────── */
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+    }
+  </style>
 </head>
 
-<body class="bg-gray-900 text-white min-h-screen">
+<body>
 
-  <div class="max-w-7xl mx-auto p-6">
-    <div class="flex justify-end gap-3 mb-6">
+<!-- ════════════════════════════════════════════════════════════════
+     NAVBAR
+     ════════════════════════════════════════════════════════════════ -->
+<nav class="navbar" role="navigation" aria-label="Main navigation">
 
-        <button onclick="openRegisterModal()"
-            class="bg-blue-500 hover:bg-blue-600 px-4 py-2 rounded-lg">
-            Register User
-        </button>
-
-        <a href="/"
-           class="bg-yellow-500 hover:bg-yellow-600 text-black px-4 py-2 rounded-lg">
-            Home
-        </a>
-
+  <!-- Brand -->
+  <a class="navbar-brand" href="/" aria-label="ITC Analytics home">
+    <div class="navbar-brand-icon" aria-hidden="true">
+      <!-- Face recognition icon -->
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#0D1117" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M9 3H5a2 2 0 00-2 2v4"/>
+        <path d="M21 3h-4m4 0v4"/>
+        <path d="M3 21v-4m0 4h4"/>
+        <path d="M21 21v-4m0 4h-4"/>
+        <circle cx="12" cy="12" r="3"/>
+      </svg>
     </div>
-    <!-- Statistics (always one row) -->
-    <!-- Analytics Cards -->
-<div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+    <span class="navbar-brand-name">ITC <span>Analytics</span></span>
+  </a>
 
-  <div class="bg-gray-800 rounded-xl p-5 shadow-lg">
-    <h3 class="text-gray-400 text-sm">Total Users</h3>
-    <p class="text-3xl font-bold text-yellow-400" id="total_users">
-      {{ total_users }}
-    </p>
+  <!-- Actions -->
+  <div class="navbar-actions">
+    <button class="btn btn-primary" onclick="openRegisterModal()" aria-label="Register a new customer">
+      <!-- Plus icon -->
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true">
+        <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+      </svg>
+      Register Customer
+    </button>
+
+    <a href="/" class="btn btn-secondary" aria-label="Go to home">
+      <!-- Home icon -->
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/>
+        <polyline points="9 22 9 12 15 12 15 22"/>
+      </svg>
+      Home
+    </a>
+
+    <!-- Future settings (disabled) -->
+    <a href="/admin" class="btn btn-secondary" aria-label="Open admin panel">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>
+      </svg>
+      Settings
+    </a>
   </div>
 
-  <div class="bg-gray-800 rounded-xl p-5 shadow-lg">
-    <h3 class="text-gray-400 text-sm">Known Users</h3>
-    <p class="text-3xl font-bold text-green-400" id="total_visits">
-      {{ total_visits }}
-    </p>
-  </div>
+</nav>
 
-  <div class="bg-gray-800 rounded-xl p-5 shadow-lg">
-    <h3 class="text-gray-400 text-sm">Unknown Users</h3>
-    <p class="text-3xl font-bold text-red-400" id="unknown_count">
-      {{ unknown_count }}
-    </p>
-  </div>
 
-  <div class="bg-gray-800 rounded-xl p-5 shadow-lg">
-    <h3 class="text-gray-400 text-sm">Highest Visits</h3>
-    <p class="text-3xl font-bold text-blue-400">
-      {{ max_visits }}
-    </p>
-  </div>
+<!-- ════════════════════════════════════════════════════════════════
+     PAGE BODY
+     ════════════════════════════════════════════════════════════════ -->
+<main class="page-wrapper">
 
-</div>
+  <!-- ── ANALYTICS CARDS ───────────────────────────────────────── -->
+  <p class="section-title">Live Metrics</p>
 
-<div class="mb-6">
+  <div class="cards-grid" role="region" aria-label="Summary statistics">
 
-    <div class="grid grid-cols-3 gap-6 mb-6">
-
-    <div class="col-span-2 bg-gray-800 rounded-xl p-6">
-        <h2 class="text-yellow-400 font-bold text-xl mb-4">
-            Weekly Attendance Analytics
-        </h2>
-
-        <canvas id="attendanceChart"></canvas>
+    <!-- Registered Customers -->
+    <div class="stat-card" id="card-registered"
+         style="--card-accent: #00D4AA;"
+         role="article" aria-label="Registered customers">
+      <div class="stat-card-header">
+        <span class="stat-card-label">Registered</span>
+        <div class="stat-card-icon" aria-hidden="true">
+          <!-- Users icon -->
+          <svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
+        </div>
+      </div>
+      <div class="stat-card-value" id="val-registered">—</div>
+      <div class="stat-card-sub">Total customers on file</div>
     </div>
 
-     <div class="bg-gray-800 rounded-xl p-4">
-        <h2 class="text-yellow-400 font-bold text-xl mb-4">
-            Live Camera
-        </h2> 
+    <!-- Known Today -->
+    <div class="stat-card" id="card-known"
+         style="--card-accent: #22C55E;"
+         role="article" aria-label="Known customers today">
+      <div class="stat-card-header">
+        <span class="stat-card-label">Known Today</span>
+        <div class="stat-card-icon" aria-hidden="true">
+          <!-- Check-circle icon -->
+          <svg viewBox="0 0 24 24"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+        </div>
+      </div>
+      <div class="stat-card-value" id="val-known">—</div>
+      <div class="stat-card-sub">Recognised visits today</div>
+    </div>
 
-        <img
+    <!-- Unknown Today -->
+    <div class="stat-card" id="card-unknown"
+         style="--card-accent: #EF4444;"
+         role="article" aria-label="Unknown customers today">
+      <div class="stat-card-header">
+        <span class="stat-card-label">Unknown Today</span>
+        <div class="stat-card-icon" aria-hidden="true">
+          <!-- Alert icon -->
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        </div>
+      </div>
+      <div class="stat-card-value" id="val-unknown">—</div>
+      <div class="stat-card-sub">New unregistered visitors</div>
+    </div>
+
+    <!-- Returning Unknown -->
+    <div class="stat-card" id="card-returning"
+         style="--card-accent: #F0B429;"
+         role="article" aria-label="Returning unknown customers today">
+      <div class="stat-card-header">
+        <span class="stat-card-label">Returning Unknown</span>
+        <div class="stat-card-icon" aria-hidden="true">
+          <!-- Repeat icon -->
+          <svg viewBox="0 0 24 24"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 014-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 01-4 4H3"/></svg>
+        </div>
+      </div>
+      <div class="stat-card-value" id="val-returning">—</div>
+      <div class="stat-card-sub">Previously seen unknowns</div>
+    </div>
+
+  </div>
+
+  <!-- ── CHART + CAMERA ─────────────────────────────────────────── -->
+  <p class="section-title">Recognition Feed & Analytics</p>
+
+  <div class="main-grid">
+
+    <!-- Weekly Analytics Chart -->
+    <div class="panel" role="region" aria-label="7-day analytics chart">
+      <div class="panel-header">
+        <span class="panel-title">7-Day Customer Traffic</span>
+        <!-- Legend -->
+        <div style="display:flex;gap:1rem;font-size:0.6875rem;color:var(--text-secondary)">
+          <span style="display:flex;align-items:center;gap:0.3rem;">
+            <span style="width:10px;height:10px;border-radius:2px;background:#00D4AA;display:inline-block;"></span>Known
+          </span>
+          <span style="display:flex;align-items:center;gap:0.3rem;">
+            <span style="width:10px;height:10px;border-radius:2px;background:#EF4444;display:inline-block;"></span>Unknown
+          </span>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div class="chart-wrapper">
+          <canvas id="trafficChart" aria-label="7-day customer traffic bar chart"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <!-- Live Camera Feed -->
+    <div class="panel" role="region" aria-label="Live camera feed">
+      <div class="panel-header">
+        <span class="panel-title">Live Camera</span>
+        <div style="font-size:0.6875rem;color:var(--text-secondary);font-family:var(--font-data)">
+          Camera 1
+        </div>
+      </div>
+      <div class="panel-body" style="padding:0.75rem;">
+        <div class="camera-container">
+          <img
+            id="cameraFeed"
             src="/video_feed"
-            class="w-full rounded-lg border-2 border-yellow-400"
-        >
+            class="camera-feed"
+            alt="Live face recognition feed"
+          />
+          <div class="camera-live-badge" aria-live="polite">
+            <div class="live-dot" aria-hidden="true"></div>
+            LIVE
+          </div>
+        </div>
+      </div>
     </div>
 
+  </div>
+
+  <!-- ── TOP CUSTOMERS + RECENT ACTIVITY ───────────────────────── -->
+  <div class="bottom-grid">
+
+    <!-- TOP CUSTOMERS -->
+    <div class="panel" role="region" aria-label="Top customers by visit count">
+      <div class="panel-header">
+        <span class="panel-title">Top Customers</span>
+        <span style="font-size:0.6875rem;color:var(--text-secondary)">By visits</span>
+      </div>
+      <div class="data-table-wrapper">
+        <table class="data-table" id="top-customers-table" aria-label="Top customers">
+          <thead>
+            <tr>
+              <th style="width:2.5rem;">#</th>
+              <th>Customer</th>
+              <th style="width:7rem;">Visits</th>
+            </tr>
+          </thead>
+          <tbody id="top-customers-body">
+            <tr><td colspan="3"><div class="empty-state">Loading…</div></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- RECENT ACTIVITY -->
+    <div class="panel" role="region" aria-label="Recent recognition activity">
+      <div class="panel-header">
+        <span class="panel-title">Recent Activity</span>
+        <span style="font-size:0.6875rem;color:var(--text-secondary)">Newest first</span>
+      </div>
+      <div class="data-table-wrapper">
+        <table class="data-table" id="activity-table" aria-label="Recent visits">
+          <thead>
+            <tr>
+              <th>Customer</th>
+              <th style="width:7.5rem;">Status</th>
+              <th style="width:9rem;">Time</th>
+            </tr>
+          </thead>
+          <tbody id="activity-body">
+            <tr><td colspan="3"><div class="empty-state">Loading…</div></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+
+</main>
 
 
-    <!-- Camera -->
-    
+<!-- ════════════════════════════════════════════════════════════════
+     REGISTER MODAL
+     ════════════════════════════════════════════════════════════════ -->
+<div id="registerModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+  <div class="modal">
 
+    <div class="modal-header">
+      <span class="modal-title" id="modal-title">Register Customer</span>
+      <button class="modal-close" onclick="closeRegisterModal()" aria-label="Close registration modal">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
+    </div>
+
+    <div class="modal-body">
+
+      <!-- Name -->
+      <div class="form-group">
+        <label for="reg-name" class="form-label">Full Name <span style="color:var(--accent-red)">*</span></label>
+        <input type="text" id="reg-name" class="form-input" placeholder="e.g. Priya Sharma" required autocomplete="name" />
+      </div>
+
+      <!-- Email -->
+      <div class="form-group">
+        <label for="reg-email" class="form-label">Email Address</label>
+        <input type="email" id="reg-email" class="form-input" placeholder="e.g. priya@email.com" autocomplete="email" />
+      </div>
+
+      <!-- Phone -->
+      <div class="form-group">
+        <label for="reg-phone" class="form-label">Phone Number</label>
+        <input type="tel" id="reg-phone" class="form-input" placeholder="e.g. +91 98765 43210" autocomplete="tel" />
+      </div>
+
+      <!-- Camera preview -->
+      <div class="form-group">
+        <label class="form-label">Face Capture <span style="color:var(--accent-red)">*</span></label>
+        <div class="camera-preview-wrapper">
+          <video id="registerVideo" autoplay playsinline muted aria-label="Camera preview"></video>
+          <div class="capture-flash" id="captureFlash"></div>
+          <div class="capture-badge" id="captureBadge">✓ Captured</div>
+        </div>
+        <canvas id="registerCanvas" aria-hidden="true"></canvas>
+      </div>
+
+    </div>
+
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="captureImage()" id="btnCapture">
+        <!-- Camera icon -->
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/>
+          <circle cx="12" cy="13" r="4"/>
+        </svg>
+        Capture
+      </button>
+      <button class="btn btn-ghost" disabled onclick="closeRegisterModal()">Cancel</button>
+      <button class="btn btn-primary btn-full" id="btnSubmit" onclick="registerCustomer()">
+        Save Customer
+      </button>
+    </div>
+
+  </div>
 </div>
 
 
-    <div class="grid md:grid-cols-2 gap-6 mb-6">
-    <!-- Registered Users -->
-     
-    <div class="bg-gray-800 rounded-xl shadow-lg overflow-hidden mb-6">
-      <div class="bg-gray-700 p-4">
-        <h2 class="text-yellow-400 font-bold text-lg md:text-xl">REGISTERED USERS</h2>
-      </div>
-      <table class="w-full text-gray-300 text-sm md:text-base" id="users_table">
-        <thead class="bg-gray-700 text-yellow-400">
-          <tr>
-            <th class="p-3 text-left">Name</th>
-            <th class="p-3 text-left">Visit Count</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for user in users %}
-          <tr class="border-b border-gray-700 hover:bg-gray-700">
-            <td class="p-3">{{ user[0] }}</td>
-            <td class="p-3 font-semibold">{{ user[1] }}</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
+<!-- ════════════════════════════════════════════════════════════════
+     TOAST CONTAINER
+     ════════════════════════════════════════════════════════════════ -->
+<div class="toast-container" id="toastContainer" aria-live="polite" aria-atomic="false"></div>
 
 
-    <!-- Recent Activity -->
-    <div class="bg-gray-800 rounded-xl shadow-lg overflow-hidden mb-6">
-      <div class="bg-gray-700 p-4">
-        <h2 class="text-yellow-400 font-bold text-lg md:text-xl">RECENT ACTIVITY LOG</h2>
-      </div>
-      <table class="w-full text-gray-300 text-sm md:text-base" id="logs_table">
-        <thead class="bg-gray-700 text-yellow-400">
-          <tr>
-            <th class="p-3 text-left">User</th>
-            <th class="p-3 text-left">Status</th>
-            <th class="p-3 text-left">Time</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for log in logs %}
-          <tr class="border-b border-gray-700 hover:bg-gray-700">
-            <td class="p-3">{{ log[0] }}</td>
-            <td class="p-3">
-              {% if log[1] == 'KNOWN' %}
-                <span class="text-green-400 font-semibold">Known</span>
-              {% else %}
-                <span class="text-red-400 font-semibold">Unknown</span>
-              {% endif %}
-            </td>
-            <td class="p-3 text-gray-400">{{ log[2] }}</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-  </div>
-    <!-- Registration Modal -->
-    <div id="registerModal" class="fixed inset-0 bg-black bg-opacity-50 hidden flex items-center justify-center">
-      <div class="bg-gray-800 rounded-xl p-6 w-11/12 max-w-md">
-        <h2 class="text-yellow-400 font-bold text-xl mb-4">Register New User</h2>
-        <form id="registerForm">
-          <input type="text" id="name" placeholder="Name" class="w-full p-2 mb-3 rounded bg-gray-700 text-white" required>
-          <input type="email" id="email" placeholder="Email" class="w-full p-2 mb-3 rounded bg-gray-700 text-white" required>
-          <video id="registerVideo" autoplay class="w-full rounded mb-3"></video>
-          <canvas id="registerCanvas" class="hidden"></canvas>
-          <div class="flex justify-between mt-4">
-            <button type="button" onclick="captureRegisterImage()" class="bg-yellow-400 hover:bg-yellow-500 text-black px-4 py-2 rounded">Capture</button>
-            <button type="submit" class="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded">Submit</button>
-            <button type="button" onclick="closeRegisterModal()" class="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded">Cancel</button>
-          </div>
-        </form>
-      </div>
-    </div>
+<!-- ════════════════════════════════════════════════════════════════
+     JAVASCRIPT
+     ════════════════════════════════════════════════════════════════ -->
+<script>
+/* ================================================================
+   CONFIG — change these to tune behaviour without hunting through code
+   ================================================================ */
+const CONFIG = {
+  refreshIntervalMs:  5000,   // how often to poll /dashboard-data
+  voiceCooldownMs:    12000,  // minimum gap between the same voice announcement
+  chartBarRadius:     4,      // px — rounded bar corners
+  toastDurationMs:    3500,   // how long toasts stay visible
+  counterDurationMs:  600,    // animated counter duration (ms)
+};
 
-  
-    <!-- JavaScript: Voice + Dashboard Refresh + Registration -->
-  <script>
-    let lastSpoken = "";
-    let availableVoices = [];
-    speechSynthesis.onvoiceschanged = () => {
-      availableVoices = speechSynthesis.getVoices();
-    };
+/* ================================================================
+   STATE
+   ================================================================ */
+let chartInstance   = null;   // Chart.js instance (destroyed before each update)
+let previousValues  = {};     // last known card values, for counter animation
+let voiceLog        = {};     // { text: timestamp } — prevents repeat announcements
+let capturedImage   = null;   // base64 data-URL from register camera capture
+let modalStream     = null;   // MediaStream from navigator.mediaDevices
+let refreshTimer    = null;   // setInterval handle
 
-    function speak(text) {
-      if (text && text !== lastSpoken) {
-        lastSpoken = text;
-        const utterance = new SpeechSynthesisUtterance(text);
-        const selectedVoice = availableVoices.find(v => v.name.includes("Female")) 
-                           || availableVoices.find(v => v.lang === "en-US");
-        if (selectedVoice) utterance.voice = selectedVoice;
-        utterance.rate = 1;
-        utterance.pitch = 1;
-        speechSynthesis.speak(utterance);
-      }
-    }
+/* ================================================================
+   VOICE ANNOUNCEMENTS
+   Uses SpeechSynthesis. Prevents the same message from firing more
+   than once per CONFIG.voiceCooldownMs window.
+   ================================================================ */
+let voices = [];
+window.speechSynthesis.onvoiceschanged = () => {
+  voices = window.speechSynthesis.getVoices();
+};
 
-    function refreshDashboard() {
-      fetch("/dashboard-data")
-        .then(res => res.json())
-        .then(data => {
-          document.getElementById("total_users").innerText = data.total_users;
-          document.getElementById("unknown_count").innerText = data.unknown_count;
-          document.getElementById("total_visits").innerText = data.total_visits;
+/**
+ * Speak a message — silently skipped if repeated too soon.
+ * @param {string} text
+ */
+function speak(text) {
+  if (!text) return;
 
-          // Update users table
-          let usersHTML = "";
-          data.users.forEach(u => {
-            usersHTML += `<tr class="border-b border-gray-700 hover:bg-gray-700">
-              <td class="p-3">${u[0]}</td>
-              <td class="p-3 font-semibold">${u[1]}</td>
-            </tr>`;
-          });
-          document.querySelector("#users_table tbody").innerHTML = usersHTML;
+  const now  = Date.now();
+  const last = voiceLog[text] || 0;
 
-          // Update logs table + speak latest
-          let logsHTML = "";
-          if (data.logs.length > 0) {
-            let latestLog = data.logs[0];
-            if (latestLog[0] === "Unknown") {
-              speak("An unknown visitor has been detected");
-            } else {
-              speak(`Welcome ${latestLog[0]}`);
-            }
-          }
-          data.logs.forEach(l => {
-            logsHTML += `<tr class="border-b border-gray-700 hover:bg-gray-700">
-              <td class="p-3">${l[0]}</td>
-              <td class="p-3">${l[1] === 'KNOWN' ? '<span class="text-green-400 font-semibold">Known</span>' : '<span class="text-red-400 font-semibold">Unknown</span>'}</td>
-              <td class="p-3 text-gray-400">${l[2]}</td>
-            </tr>`;
-          });
-          document.querySelector("#logs_table tbody").innerHTML = logsHTML;
-        });
-    }
+  if (now - last < CONFIG.voiceCooldownMs) return;
 
-    setInterval(refreshDashboard, 5000);
+  voiceLog[text] = now;
 
-    // 🔵 Registration Modal Functions
-    function openRegisterModal() {
-
-  fetch("/pause-camera")
-    .then(() => {
-
-      document.getElementById("registerModal")
-        .classList.remove("hidden");
-
-      navigator.mediaDevices.getUserMedia({ video: true })
-        .then(stream => {
-          document.getElementById("registerVideo").srcObject = stream;
-        })
-        .catch(err => {
-          alert("Camera access denied: " + err);
-          fetch("/resume-camera");
-        });
-
-    });
-
+  const utterance = new SpeechSynthesisUtterance(text);
+  // Prefer a clear English voice
+  const preferred = voices.find(v => v.lang === 'en-IN')
+                 || voices.find(v => v.lang === 'en-US')
+                 || voices[0];
+  if (preferred) utterance.voice = preferred;
+  utterance.rate  = 1.0;
+  utterance.pitch = 1.0;
+  window.speechSynthesis.speak(utterance);
 }
 
-function closeRegisterModal() {
+/* ================================================================
+   TOAST NOTIFICATIONS
+   ================================================================ */
 
-  document.getElementById("registerModal")
-    .classList.add("hidden");
+/**
+ * Show a non-blocking toast message.
+ * @param {string}  message
+ * @param {'success'|'error'} type
+ */
+function showToast(message, type = 'success') {
+  const container = document.getElementById('toastContainer');
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${type}`;
+  toast.innerHTML = `
+    <div class="toast-icon" aria-hidden="true">${type === 'success' ? '✓' : '!'}</div>
+    <div class="toast-message">${message}</div>
+  `;
+  container.appendChild(toast);
+  setTimeout(() => toast.remove(), CONFIG.toastDurationMs);
+}
 
-  let video = document.getElementById("registerVideo");
+/* ================================================================
+   ANIMATED COUNTER
+   Smoothly counts from the previous value to the new one.
+   ================================================================ */
 
-  if (video.srcObject) {
-    video.srcObject.getTracks().forEach(track => track.stop());
+/**
+ * Animate a numeric element from its current displayed value to target.
+ * @param {HTMLElement} el
+ * @param {number}      target
+ * @param {string}      cardId   — used to trigger the card pulse
+ */
+function animateCounter(el, target, cardId) {
+  const previous = parseInt(el.textContent, 10) || 0;
+  if (previous === target) return;
+
+  // Pulse the accent bar
+  const card = document.getElementById(cardId);
+  if (card) {
+    card.classList.add('pulse');
+    setTimeout(() => card.classList.remove('pulse'), 800);
   }
 
-  fetch("/resume-camera");
+  const start   = performance.now();
+  const delta   = target - previous;
+  const dur     = CONFIG.counterDurationMs;
+
+  function step(now) {
+    const t = Math.min((now - start) / dur, 1);
+    // ease-out cubic
+    const eased = 1 - Math.pow(1 - t, 3);
+    el.textContent = Math.round(previous + delta * eased);
+    if (t < 1) requestAnimationFrame(step);
+  }
+
+  requestAnimationFrame(step);
 }
 
-    function captureRegisterImage() {
-      let video = document.getElementById("registerVideo");
-      let canvas = document.getElementById("registerCanvas");
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      let ctx = canvas.getContext("2d");
-      ctx.drawImage(video, 0, 0);
-    }
+/* ================================================================
+   UPDATE ANALYTICS CARDS
+   ================================================================ */
 
-    document.addEventListener("DOMContentLoaded", () => {
-      document.getElementById("registerForm").addEventListener("submit", function(e) {
-        e.preventDefault();
-        let canvas = document.getElementById("registerCanvas");
-        let imageData = canvas.toDataURL("image/jpeg");
-        let name = document.getElementById("name").value;
-        let email = document.getElementById("email").value;
+/**
+ * Update the four summary cards from API data.
+ * @param {Object} data — /dashboard-data response
+ */
+function updateCards(data) {
+  const fields = [
+    { elId: 'val-registered', cardId: 'card-registered', key: 'total_registered' },
+    { elId: 'val-known',      cardId: 'card-known',      key: 'known_today'      },
+    { elId: 'val-unknown',    cardId: 'card-unknown',    key: 'unknown_today'    },
+    { elId: 'val-returning',  cardId: 'card-returning',  key: 'returning_unknown_today' },
+  ];
 
-        fetch("/register-camera", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name: name, email: email, image: imageData })
-        })
-        .then(res => res.text())
-        .then(msg => {
-          alert(msg);
-          speak("New user registered successfully"); // 🔊 voice feedback
-          closeRegisterModal();
-          refreshDashboard();
-        });
-      });
-    });
-  </script>
-  <script>
-fetch("/dashboard-data")
-.then(response => response.json())
-.then(data => {
+  fields.forEach(({ elId, cardId, key }) => {
+    const el  = document.getElementById(elId);
+    const val = data[key] ?? 0;
+    animateCounter(el, val, cardId);
+  });
+}
 
-    const attendance = data.attendance;
+/* ================================================================
+   UPDATE CHART
+   Destroys previous Chart.js instance to prevent memory leaks and
+   duplicate overlapping charts.
+   ================================================================ */
 
-    const labels = attendance.map(item => item.day);
+/**
+ * Rebuild the traffic chart with fresh data.
+ * @param {Array} chartData — [{day, known, unknown}, …]
+ */
+function updateChart(chartData) {
+  if (!chartData || chartData.length === 0) return;
 
-    const knownData = attendance.map(item => item.known);
+  // Labels: format "2026-06-20" → "Jun 20"
+  const labels = chartData.map(d => {
+    const date = new Date(d.day + 'T00:00:00');
+    return date.toLocaleDateString('en-GB', { month: 'short', day: 'numeric' });
+  });
 
-    const unknownData = attendance.map(item => item.unknown);
+  const knownData   = chartData.map(d => d.known);
+  const unknownData = chartData.map(d => d.unknown);
 
-    const ctx = document.getElementById('attendanceChart');
+  const ctx = document.getElementById('trafficChart').getContext('2d');
 
-    new Chart(ctx, {
-        type: 'bar',
-        data: {
-            labels: labels,
-            datasets: [
-                {
-                    label: 'Present',
-                    data: knownData,
-                    backgroundColor: '#22c55e'
-                },
-                {
-                    label: 'Absent',
-                    data: unknownData,
-                    backgroundColor: '#ef4444'
-                }
-            ]
+  // Destroy existing instance to prevent duplicate charts / memory leaks
+  if (chartInstance) {
+    chartInstance.destroy();
+    chartInstance = null;
+  }
+
+  chartInstance = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        {
+          label:           'Known',
+          data:            knownData,
+          backgroundColor: 'rgba(0,212,170,0.75)',
+          hoverBackgroundColor: '#00D4AA',
+          borderRadius:    CONFIG.chartBarRadius,
+          borderSkipped:   false,
         },
-        options: {
-            responsive: true,
-            plugins: {
-                legend: {
-                    labels: {
-                        color: 'white'
-                    }
-                }
-            },
-            scales: {
-                x: {
-                    ticks: {
-                        color: 'white'
-                    }
-                },
-                y: {
-                    beginAtZero: true,
-                    ticks: {
-                        color: 'white'
-                    }
-                }
-            }
-        }
+        {
+          label:           'Unknown',
+          data:            unknownData,
+          backgroundColor: 'rgba(239,68,68,0.7)',
+          hoverBackgroundColor: '#EF4444',
+          borderRadius:    CONFIG.chartBarRadius,
+          borderSkipped:   false,
+        },
+      ],
+    },
+    options: {
+      responsive:          true,
+      maintainAspectRatio: false,
+      animation:           { duration: 400, easing: 'easeOutCubic' },
+      plugins: {
+        legend: { display: false },   // custom legend is in the panel header
+        tooltip: {
+          backgroundColor: '#161B22',
+          borderColor:     '#30363D',
+          borderWidth:     1,
+          titleColor:      '#E6EDF3',
+          bodyColor:       '#8B949E',
+          padding:         10,
+          callbacks: {
+            label: ctx => ` ${ctx.dataset.label}: ${ctx.parsed.y}`,
+          },
+        },
+      },
+      scales: {
+        x: {
+          ticks:  { color: '#8B949E', font: { size: 11 } },
+          grid:   { color: '#21262D' },
+          border: { color: '#30363D' },
+        },
+        y: {
+          beginAtZero: true,
+          ticks: {
+            color:     '#8B949E',
+            font:      { size: 11 },
+            precision: 0,
+          },
+          grid:   { color: '#21262D' },
+          border: { color: '#30363D' },
+        },
+      },
+    },
+  });
+}
+
+/* ================================================================
+   UPDATE TOP CUSTOMERS TABLE
+   ================================================================ */
+
+/**
+ * Rebuild the top-customers table body.
+ * @param {Array} customers — [{name, visit_count}, …]
+ */
+function updateTopCustomers(customers) {
+  const tbody = document.getElementById('top-customers-body');
+
+  if (!customers || customers.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="3"><div class="empty-state">No registered customers yet.</div></td></tr>';
+    return;
+  }
+
+  const maxVisits = Math.max(...customers.map(c => c.visit_count), 1);
+
+  tbody.innerHTML = customers.map((c, i) => {
+    const pct = Math.round((c.visit_count / maxVisits) * 100);
+    return `
+      <tr>
+        <td class="rank">${i + 1}</td>
+        <td style="font-weight:500">${escapeHtml(c.name)}</td>
+        <td>
+          <div class="visit-bar-wrapper">
+            <span class="count-cell">${c.visit_count}</span>
+            <div class="visit-bar" aria-hidden="true">
+              <div class="visit-bar-fill" style="width:${pct}%"></div>
+            </div>
+          </div>
+        </td>
+      </tr>
+    `;
+  }).join('');
+}
+
+/* ================================================================
+   UPDATE RECENT ACTIVITY TABLE
+   ================================================================ */
+
+/**
+ * Rebuild the activity log table body.
+ * @param {Array} visits — [{name, type, time}, …]
+ */
+function updateRecentActivity(visits) {
+  const tbody = document.getElementById('activity-body');
+
+  if (!visits || visits.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="3"><div class="empty-state">No activity recorded today.</div></td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = visits.map(v => {
+    const badge = buildBadge(v.type);
+    return `
+      <tr>
+        <td style="font-weight:500">${escapeHtml(v.name)}</td>
+        <td>${badge}</td>
+        <td class="time-cell">${formatTime(v.time)}</td>
+      </tr>
+    `;
+  }).join('');
+}
+
+/**
+ * Build a coloured status badge for the activity table.
+ * @param {'known'|'unknown'|'returning_unknown'} type
+ * @returns {string} HTML string
+ */
+function buildBadge(type) {
+  if (type === 'known') {
+    return `<span class="badge badge-known"><span class="badge-dot" aria-hidden="true"></span>Known</span>`;
+  }
+  if (type === 'returning_unknown') {
+    return `<span class="badge badge-returning"><span class="badge-dot" aria-hidden="true"></span>Returning</span>`;
+  }
+  return `<span class="badge badge-unknown"><span class="badge-dot" aria-hidden="true"></span>Unknown</span>`;
+}
+
+/* ================================================================
+   VOICE TRIGGER
+   Announce the most recent event each refresh cycle. Cooldown
+   prevents the same phrase repeating every 5 seconds.
+   ================================================================ */
+
+/**
+ * Speak a welcome or alert based on the latest visit.
+ * @param {Array} visits
+ */
+function announceLatestVisit(visits) {
+  if (!visits || visits.length === 0) return;
+
+  const latest = visits[0];
+
+  if (latest.type === 'known') {
+    speak(`Welcome, ${latest.name}`);
+  } else if (latest.type === 'returning_unknown') {
+    speak('A returning visitor has been detected');
+  } else {
+    speak('Unknown customer detected');
+  }
+}
+
+/* ================================================================
+   MAIN REFRESH — calls /dashboard-data and updates everything
+   ================================================================ */
+
+/**
+ * Fetch /dashboard-data and update all dashboard components.
+ * Called on load and then on a setInterval.
+ */
+async function refreshDashboard() {
+  let data;
+
+  try {
+    const res = await fetch('/dashboard-data');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    data = await res.json();
+  } catch (err) {
+    console.warn('[dashboard] fetch failed:', err);
+    return;   // keep the last good values visible, silently retry next cycle
+  }
+
+  updateCards(data);
+  updateChart(data.chart);
+  updateTopCustomers(data.top_customers);
+  updateRecentActivity(data.recent_visits);
+  announceLatestVisit(data.recent_visits);
+}
+
+/* ================================================================
+   REGISTRATION MODAL
+   ================================================================ */
+
+/** Open the register modal and start the webcam stream. */
+async function openRegisterModal() {
+  // Pause the main /video_feed stream
+  await fetch('/pause-camera').catch(() => {});
+
+  capturedImage = null;
+  document.getElementById('captureBadge').classList.remove('is-visible');
+  document.getElementById('reg-name').value  = '';
+  document.getElementById('reg-email').value = '';
+  document.getElementById('reg-phone').value = '';
+
+  document.getElementById('registerModal').classList.add('is-open');
+
+  try {
+    modalStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    document.getElementById('registerVideo').srcObject = modalStream;
+  } catch (err) {
+    showToast('Camera access denied: ' + err.message, 'error');
+    await fetch('/resume-camera').catch(() => {});
+    document.getElementById('registerModal').classList.remove('is-open');
+  }
+}
+
+/** Close the register modal, stop webcam, resume main feed. */
+async function closeRegisterModal() {
+  document.getElementById('registerModal').classList.remove('is-open');
+
+  // Stop webcam tracks
+  if (modalStream) {
+    modalStream.getTracks().forEach(t => t.stop());
+    modalStream = null;
+  }
+
+  document.getElementById('registerVideo').srcObject = null;
+
+  // Resume the main face recognition stream
+  await fetch('/resume-camera').catch(() => {});
+}
+
+/** Capture a still from the modal webcam. */
+function captureImage() {
+  const video  = document.getElementById('registerVideo');
+  const canvas = document.getElementById('registerCanvas');
+
+  if (!video.srcObject) {
+    showToast('Camera not ready yet.', 'error');
+    return;
+  }
+
+  canvas.width  = video.videoWidth  || 640;
+  canvas.height = video.videoHeight || 480;
+
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  capturedImage = canvas.toDataURL('image/jpeg', 0.92);
+
+  // Flash effect
+  const flash = document.getElementById('captureFlash');
+  flash.classList.add('flash');
+  setTimeout(() => flash.classList.remove('flash'), 150);
+
+  // Show badge
+  document.getElementById('captureBadge').classList.add('is-visible');
+}
+
+/**
+ * Submit the registration form — POST to /register-camera.
+ * Matches the exact JSON shape the backend expects.
+ */
+async function registerCustomer() {
+  const name  = document.getElementById('reg-name').value.trim();
+  const email = document.getElementById('reg-email').value.trim();
+  const phone = document.getElementById('reg-phone').value.trim();
+
+  if (!name) {
+    showToast('Please enter the customer name.', 'error');
+    document.getElementById('reg-name').focus();
+    return;
+  }
+
+  if (!capturedImage) {
+    showToast('Please capture a face photo first.', 'error');
+    return;
+  }
+
+  // Show spinner
+  const btn = document.getElementById('btnSubmit');
+  const originalHTML = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<div class="spinner"></div> Saving…';
+
+  try {
+    const res = await fetch('/register-camera', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, email, phone, image: capturedImage }),
     });
 
+    const json = await res.json();
+
+    if (json.success) {
+      speak('New customer registered successfully');
+      showToast(json.message || 'Customer registered.', 'success');
+      await closeRegisterModal();
+      // Immediate refresh so the new customer appears in the table
+      refreshDashboard();
+    } else {
+      showToast(json.message || 'Registration failed.', 'error');
+    }
+  } catch (err) {
+    showToast('Network error — please try again.', 'error');
+    console.error('[register] error:', err);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = originalHTML;
+  }
+}
+
+/* ================================================================
+   UTILITIES
+   ================================================================ */
+
+/**
+ * Prevent XSS when inserting user-supplied strings into innerHTML.
+ * @param {string} str
+ * @returns {string}
+ */
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+/**
+ * Format an ISO-like datetime string into a readable time.
+ * "2026-06-26 11:25:10" → "11:25:10"
+ * @param {string} datetimeStr
+ * @returns {string}
+ */
+function formatTime(datetimeStr) {
+  if (!datetimeStr) return '—';
+  const parts = datetimeStr.split(' ');
+  return parts.length === 2 ? parts[1] : datetimeStr;
+}
+
+/* ================================================================
+   KEYBOARD — close modal with Escape
+   ================================================================ */
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    const modal = document.getElementById('registerModal');
+    if (modal.classList.contains('is-open')) closeRegisterModal();
+  }
+});
+
+/* ================================================================
+   CLICK-OUTSIDE — close modal when backdrop is clicked
+   ================================================================ */
+document.getElementById('registerModal').addEventListener('click', function(e) {
+  if (e.target === this) closeRegisterModal();
+});
+
+/* ================================================================
+   BOOTSTRAP — initial load + auto-refresh
+   ================================================================ */
+document.addEventListener('DOMContentLoaded', () => {
+  // First paint — fetch immediately
+  refreshDashboard();
+
+  // Then refresh on a fixed interval
+  refreshTimer = setInterval(refreshDashboard, CONFIG.refreshIntervalMs);
 });
 </script>
-<!-- Hidden Face Recognition Stream -->
-<img src="/video_feed" style="display:none;">
+
 </body>
 </html>

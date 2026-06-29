@@ -1,104 +1,136 @@
-# import sqlite3
+from database import get_connection
 
-# conn = sqlite3.connect("database.db")
+conn = get_connection()
+cur = conn.cursor()
 
-# cur = conn.cursor()
+# =====================================================
+# REGISTERED CUSTOMERS
+# =====================================================
 
-# cur.execute("""
-# CREATE TABLE IF NOT EXISTS users(
-#     id INTEGER PRIMARY KEY AUTOINCREMENT,
-#     name TEXT,
-#     email TEXT,
-#     face_encoding TEXT
-# )
-# """)
+cur.execute("""
+CREATE TABLE IF NOT EXISTS customers (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    email VARCHAR(150),
+    phone VARCHAR(20),
+    face_encoding TEXT NOT NULL,
+    visit_count INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+""")
 
-# conn.commit()
-# conn.close()
+# =====================================================
+# UNKNOWN CUSTOMERS
+# =====================================================
 
-# print("Database created")
+cur.execute("""
+CREATE TABLE IF NOT EXISTS unknown_customers (
+    id SERIAL PRIMARY KEY,
+    face_encoding TEXT NOT NULL,
+    visit_count INTEGER DEFAULT 1,
+    first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+""")
 
+# =====================================================
+# VISIT LOGS
+# =====================================================
 
-# import sqlite3
+cur.execute("""
+CREATE TABLE IF NOT EXISTS visit_logs (
+    id SERIAL PRIMARY KEY,
+    customer_type VARCHAR(20) NOT NULL,
+    customer_id INTEGER NOT NULL,
+    visit_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+""")
 
-# conn = sqlite3.connect("database.db")
-# cur = conn.cursor()
+# =====================================================
+# DAILY STATISTICS
+# =====================================================
 
-# try:
-#     cur.execute("""
-#     ALTER TABLE users
-#     ADD COLUMN visit_count INTEGER DEFAULT 0
-#     """)
-#     print("Column Added")
-# except:
-#     print("Column Already Exists")
+cur.execute("""
+CREATE TABLE IF NOT EXISTS daily_statistics (
+    stat_date DATE PRIMARY KEY,
+    known_today INTEGER DEFAULT 0,
+    unknown_today INTEGER DEFAULT 0,
+    returning_unknown_today INTEGER DEFAULT 0
+)
+""")
 
-# conn.commit()
-# conn.close()
+# =====================================================
+# DATABASE MIGRATION
+# =====================================================
 
-
-# import sqlite3
-
-# conn = sqlite3.connect("database.db")
-# cur = conn.cursor()
-
-# cur.execute("""
-# CREATE TABLE IF NOT EXISTS stats(
-#     id INTEGER PRIMARY KEY,
-#     unknown_count INTEGER DEFAULT 0
-# )
-# """)
-
-# cur.execute("""
-# INSERT OR IGNORE INTO stats(id, unknown_count)
-# VALUES(1,0)
-# """)
-
-# conn.commit()
-# conn.close()
-
-# print("Stats table created")
-
-
-
-# import sqlite3
-
-# conn = sqlite3.connect("database.db")
-# cur = conn.cursor()
-
-# cur.execute("""
-# CREATE TABLE IF NOT EXISTS unknown_faces(
-#     id INTEGER PRIMARY KEY AUTOINCREMENT,
-#     face_encoding TEXT,
-#     visit_count INTEGER DEFAULT 1,
-#     last_seen DATETIME DEFAULT CURRENT_TIMESTAMP
-# )
-# """)
-
-# conn.commit()
-# conn.close()
-
-# print("unknown_faces table created")
-
-# import sqlite3
-
-# conn = sqlite3.connect("database.db")
-# cur = conn.cursor()
-
-# cur.execute("SELECT COUNT(*) FROM unknown_faces")
-# print(cur.fetchone())
-
-# conn.close()
+cur.execute("""
+ALTER TABLE customers
+ADD COLUMN IF NOT EXISTS last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+""")
 
 
 
-import sqlite3
+...
+# =====================================================
+# DATABASE MIGRATION
+# =====================================================
 
-conn = sqlite3.connect("database.db")
+cur.execute("""
+ALTER TABLE customers
+ADD COLUMN IF NOT EXISTS last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+""")
 
-conn.execute("ALTER TABLE staff_faces ADD COLUMN visit_count INTEGER DEFAULT 0")
+# =====================================================
+# SYSTEM SETTINGS
+# =====================================================
+
+cur.execute("""
+CREATE TABLE IF NOT EXISTS system_settings (
+    id SERIAL PRIMARY KEY,
+
+    new_face_delay INTEGER DEFAULT 3,
+    cooldown_seconds INTEGER DEFAULT 10,
+    pending_expire_seconds INTEGER DEFAULT 8,
+
+    known_threshold REAL DEFAULT 0.45,
+    unknown_threshold REAL DEFAULT 0.40,
+
+    dashboard_refresh_seconds INTEGER DEFAULT 5,
+    auto_delete_logs_days INTEGER DEFAULT 3,
+
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+""")
+
+cur.execute("""
+INSERT INTO system_settings (
+    id,
+    new_face_delay,
+    cooldown_seconds,
+    pending_expire_seconds,
+    known_threshold,
+    unknown_threshold,
+    dashboard_refresh_seconds,
+    auto_delete_logs_days
+)
+SELECT
+    1,
+    3,
+    10,
+    8,
+    0.45,
+    0.40,
+    5,
+    3
+WHERE NOT EXISTS (
+    SELECT 1 FROM system_settings WHERE id = 1
+);
+""")
 
 conn.commit()
+
+cur.close()
 conn.close()
 
-print("Done! Column added successfully.")
+print("ITC PostgreSQL database created successfully!")
