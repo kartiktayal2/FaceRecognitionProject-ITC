@@ -12,6 +12,7 @@ import numpy as np
 import os
 import time
 
+from detectors import smoking_detector
 from PIL import Image
 from datetime import datetime, timedelta
 
@@ -132,6 +133,18 @@ unknown_encodings = []  # list of np.ndarray
 unknown_ids       = []  # list of int (unknown_customers.id)
 
 
+
+
+# How often to call the Roboflow API
+SMOKING_DETECT_EVERY_N_FRAMES = 8
+
+# Internal frame counter
+_smoking_frame_counter = 0
+
+# Cache of the last detections
+_last_smoking_detections = []
+
+
 # =============================================================
 # COOLDOWN / STATE TRACKING (in-process RAM only)
 # =============================================================
@@ -142,10 +155,26 @@ known_cooldown: dict = {}
 # {unknown_customer_id: datetime}  — prevents re-counting returning unknown
 returning_cooldown: dict = {}
 
-# Tracks brand-new faces that haven't been inserted yet.
-# Key: a rounded tuple of the first 8 encoding values (fingerprint).
-# Value: {'first_seen': datetime, 'encoding': np.ndarray}
-pending_new_faces: dict = {}
+# =============================================================
+# PENDING UNKNOWN FACE TRACKER (VERSION 2)
+# -------------------------------------------------------------
+# WHY THIS EXISTS:
+#
+# The previous implementation used a rounded face encoding as
+# a dictionary key. Face encodings change slightly every frame,
+# causing the timer to restart continuously.
+#
+# This implementation tracks ONLY ONE pending unknown face.
+# If the same face remains visible (distance < threshold),
+# the timer continues.
+#
+# If a different face appears, the timer restarts.
+#
+# Debug Prefix:
+#     [PENDING]
+# =============================================================
+
+pending_unknown_face = None
 
 # NOTE: NEW_FACE_WAIT_SECONDS, COOLDOWN_SECONDS, and PENDING_EXPIRE_SECONDS
 # are no longer hardcoded here. Use SETTINGS["new_face_delay"],
@@ -168,8 +197,6 @@ camera: cv2.VideoCapture = cv2.VideoCapture(CAMERA_INDEX)
 # face without a full distance search.
 # =============================================================
 
-def _face_key(encoding: np.ndarray) -> tuple:
-    return tuple(np.round(encoding[:8], 2))
 
 
 # =============================================================
@@ -599,7 +626,9 @@ def _process_face(face_encoding: np.ndarray) -> tuple:
 
     Returns (label: str, color: tuple[int,int,int])
     """
-    global known_cooldown, returning_cooldown, pending_new_faces
+    global known_cooldown
+    global returning_cooldown
+    global pending_unknown_face
     global known_encodings, known_names, known_ids
     global unknown_encodings, unknown_ids
 
@@ -688,65 +717,117 @@ def _process_face(face_encoding: np.ndarray) -> tuple:
                 return "Returning Unknown", (0, 215, 255)   # yellow
 
     # ----------------------------------------------------------
-    # STEP 3 — brand new face
-    # Show red rectangle immediately.
-    # Only insert into DB after the face has been continuously
-    # visible for NEW_FACE_WAIT_SECONDS seconds.
+    # STEP 3 — NEW UNKNOWN CUSTOMER (VERSION 2)
     # ----------------------------------------------------------
-    face_key = _face_key(face_encoding)
+    # Uses face distance instead of unstable face keys.
+    # Debug Prefix: [PENDING]
+    # ----------------------------------------------------------
 
-    if face_key not in pending_new_faces:
-        pending_new_faces[face_key] = {
+    if pending_unknown_face is None:
+
+        pending_unknown_face = {
+            "encoding": face_encoding.copy(),
             "first_seen": now,
-            "encoding":   face_encoding,
+            "last_seen": now,
         }
-        print(f"[recognition] New face detected, starting {SETTINGS['new_face_delay']}s timer.")
-        return "New Customer", (0, 0, 255)   # red
 
-    entry    = pending_new_faces[face_key]
-    elapsed  = (now - entry["first_seen"]).total_seconds()
+        print("[PENDING] Started tracking new face.")
 
-    if elapsed < SETTINGS["new_face_delay"]:
-        # Still within the wait window — keep showing red
         return "New Customer", (0, 0, 255)
 
-    # Time has elapsed → insert into DB (once only, then remove from pending)
-    del pending_new_faces[face_key]
 
-    # Double-check: face must still be distant from all known customers
-    if len(known_encodings) > 0:
-        min_known_dist = float(np.min(face_recognition.face_distance(known_encodings, face_encoding)))
-        if min_known_dist < SETTINGS["known_threshold"]:
-            print("[recognition] Skipped insertion — too close to a known customer.")
-            return "New Customer", (0, 0, 255)
+    distance = face_recognition.face_distance(
+        [pending_unknown_face["encoding"]],
+        face_encoding
+    )[0]
+
+    if distance > 0.55:
+
+        print(f"[PENDING] Different face detected ({distance:.3f}). Restarting timer.")
+
+        pending_unknown_face = {
+            "encoding": face_encoding.copy(),
+            "first_seen": now,
+            "last_seen": now,
+        }
+
+        return "New Customer", (0, 0, 255)
+
+
+    pending_unknown_face["last_seen"] = now
+
+    elapsed = (
+        now - pending_unknown_face["first_seen"]
+    ).total_seconds()
+
+    print(f"[PENDING] Same face | elapsed={elapsed:.2f}s")
+
+    if elapsed < SETTINGS["new_face_delay"]:
+        return "New Customer", (0, 0, 255)
+
+
+    print("[DB] Inserting unknown customer...")
 
     conn = get_connection()
-    cur  = conn.cursor()
+    cur = conn.cursor()
 
     _ensure_daily_stats(cur, today)
 
     cur.execute(
         """
-        INSERT INTO unknown_customers (face_encoding, visit_count, first_seen, last_seen)
-        VALUES (%s, 1, NOW(), NOW())
+        INSERT INTO unknown_customers
+        (
+            face_encoding,
+            visit_count,
+            first_seen,
+            last_seen
+        )
+        VALUES
+        (
+            %s,
+            1,
+            NOW(),
+            NOW()
+        )
         RETURNING id
         """,
-        (json.dumps(face_encoding.tolist()),),
+        (
+            json.dumps(
+                pending_unknown_face["encoding"].tolist()
+            ),
+        ),
     )
+
     new_unknown_id = cur.fetchone()[0]
 
-    _record_visit(cur, "unknown", new_unknown_id, today)
+    _record_visit(
+        cur,
+        "unknown",
+        new_unknown_id,
+        today,
+    )
 
     conn.commit()
     conn.close()
 
-    # Update RAM cache immediately (no full reload needed)
     unknown_ids.append(new_unknown_id)
-    unknown_encodings.append(face_encoding)
+    unknown_encodings.append(
+        pending_unknown_face["encoding"].copy()
+    )
 
-    print(f"[recognition] New unknown customer inserted, id={new_unknown_id}")
+    print(f"[DB] Unknown customer inserted (ID={new_unknown_id})")
+
+    # Clear pending tracker after successful insert
+    pending_unknown_face = None
+    refresh_face_cache()
+
+    # Prevent immediate re-insertion while the person
+    # is still standing in front of the camera.
+    returning_cooldown[new_unknown_id] = now
 
     return "New Customer", (0, 0, 255)
+
+
 
 
 # =============================================================
@@ -756,7 +837,9 @@ def _process_face(face_encoding: np.ndarray) -> tuple:
 # =============================================================
 
 def gen_frames():
-    global camera, pending_new_faces
+    global camera
+    global pending_unknown_face
+    global _smoking_frame_counter, _last_smoking_detections
 
     while True:
 
@@ -767,9 +850,16 @@ def gen_frames():
 
         success, frame = camera.read()
 
+        
+
         if not success:
             time.sleep(0.05)
             continue
+        _smoking_frame_counter += 1
+        
+        if _smoking_frame_counter >= SMOKING_DETECT_EVERY_N_FRAMES:
+            _smoking_frame_counter = 0
+            _last_smoking_detections = smoking_detector.detect(frame)
 
         # Convert BGR frame to RGB for face_recognition
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -778,14 +868,29 @@ def gen_frames():
         face_locations = face_recognition.face_locations(rgb_frame)
         face_encodings_list = face_recognition.face_encodings(rgb_frame, face_locations)
 
-        # Expire stale pending-new entries (face left and re-appeared briefly)
+        # ============================================================
+        # PENDING UNKNOWN FACE CLEANUP (VERSION 2)
+        #
+        # If nobody has been seen for longer than the configured timeout,
+        # discard the pending face so the next visitor starts fresh.
+        # ============================================================
+
         now = datetime.now()
-        stale_keys = [
-            k for k, v in pending_new_faces.items()
-            if (now - v["first_seen"]).total_seconds() > SETTINGS["pending_expire_seconds"]
-        ]
-        for k in stale_keys:
-            del pending_new_faces[k]
+
+        if pending_unknown_face is not None:
+
+            if "last_seen" not in pending_unknown_face:
+                pending_unknown_face["last_seen"] = now
+
+            idle_time = (
+            now - pending_unknown_face["last_seen"]
+            ).total_seconds()
+
+            if idle_time > SETTINGS["pending_expire_seconds"]:
+
+                print("[PENDING] Pending face expired.")
+
+                pending_unknown_face = None
 
         # Process each detected face
         for (top, right, bottom, left), face_encoding in zip(
@@ -1557,3 +1662,5 @@ if __name__ == "__main__":
         port=int(os.environ.get("PORT", 5000)),
         debug=os.environ.get("FLASK_DEBUG", "true").lower() == "true",
     )
+
+
