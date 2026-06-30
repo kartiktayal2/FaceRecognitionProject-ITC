@@ -13,6 +13,8 @@ import os
 import time
 
 from detectors import smoking_detector
+from services.person_matcher import match_face_to_person
+from services.smoking_service import analyse_person
 from PIL import Image
 from datetime import datetime, timedelta
 
@@ -810,15 +812,23 @@ def _process_face(face_encoding: np.ndarray) -> tuple:
     conn.commit()
     conn.close()
 
+    # ----------------------------------------------------------
+    # Save encoding BEFORE clearing pending_unknown_face.
+    # Another frame may enter _process_face() before this
+    # function finishes, so never read pending_unknown_face
+    # after it has potentially been cleared.
+    # ----------------------------------------------------------
+
+    saved_encoding = pending_unknown_face["encoding"].copy()
+
+    pending_unknown_face = None
+
     unknown_ids.append(new_unknown_id)
-    unknown_encodings.append(
-        pending_unknown_face["encoding"].copy()
-    )
+    unknown_encodings.append(saved_encoding)
 
     print(f"[DB] Unknown customer inserted (ID={new_unknown_id})")
 
-    # Clear pending tracker after successful insert
-    pending_unknown_face = None
+    returning_cooldown[new_unknown_id] = now
     refresh_face_cache()
 
     # Prevent immediate re-insertion while the person
@@ -897,6 +907,30 @@ def gen_frames():
             face_locations, face_encodings_list
         ):
             label, color = _process_face(face_encoding)
+            face_box = (top, right, bottom, left)
+
+            matched_person = match_face_to_person(
+                face_box,
+                _last_smoking_detections
+            )
+            # ----------------------------------------------------------
+            # Analyse smoking-related detections for the matched person.
+            # This only returns detection flags.
+            # It DOES NOT change colours, database or dashboard.
+            # ----------------------------------------------------------
+
+            smoking_status = analyse_person(
+                matched_person,
+                _last_smoking_detections
+            )
+            if any(smoking_status.values()):
+                print(f"[SMOKING] {label} -> {smoking_status}")
+
+            if matched_person:
+                pass
+
+            else:
+                pass
 
             # Draw bounding rectangle
             cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
@@ -913,6 +947,64 @@ def gen_frames():
             )
 
         # Encode frame as JPEG and yield for streaming
+        # =============================================================
+        # ROBOFLOW VISUALIZATION
+        #
+        # Draw every Roboflow prediction on the current frame.
+        # This is completely independent of face recognition.
+        #
+        # Debug Prefix:
+        #     [ROBOFLOW]
+        # =============================================================
+
+        if _last_smoking_detections is None:
+            _last_smoking_detections = []
+
+        for det in _last_smoking_detections:
+
+            label = det["label"]
+            confidence = det["confidence"]
+
+            x = det["x"]
+            y = det["y"]
+            w = det["width"]
+            h = det["height"]
+
+            left = int(x - w / 2)
+            top = int(y - h / 2)
+            right = int(x + w / 2)
+            bottom = int(y + h / 2)
+
+            # Different colours per object
+            if label.lower() == "person":
+                color = (255, 0, 0)      # Blue
+
+            elif label.lower() == "lighter":
+                color = (0, 255, 255)    # Yellow
+
+            elif label.lower() == "cigarette":
+                color = (0, 0, 255)      # Red
+
+            else:
+                color = (255, 255, 255)  # White
+
+            cv2.rectangle(
+                frame,
+                (left, top),
+                (right, bottom),
+                color,
+                2
+            )
+
+            cv2.putText(
+                frame,
+                f"{label} {confidence:.2f}",
+                (left, top - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                color,
+                2,
+            )
         ret, buffer = cv2.imencode(".jpg", frame)
         if not ret:
             continue

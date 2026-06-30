@@ -103,6 +103,28 @@ CREATE TABLE IF NOT EXISTS system_settings (
 )
 """)
 
+# =====================================================
+# SMOKING EVENTS
+# =====================================================
+
+cur.execute("""
+CREATE TABLE IF NOT EXISTS smoking_events (
+
+    id SERIAL PRIMARY KEY,
+
+    customer_type VARCHAR(20) NOT NULL,
+
+    customer_id INTEGER NOT NULL,
+
+    event_type VARCHAR(20) NOT NULL,
+
+    confidence REAL,
+
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+
+)
+""")
+
 cur.execute("""
 INSERT INTO system_settings (
     id,
