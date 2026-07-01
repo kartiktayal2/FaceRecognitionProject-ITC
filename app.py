@@ -15,6 +15,7 @@ import time
 from detectors import smoking_detector
 from services.person_matcher import match_face_to_person
 from services.smoking_service import analyse_person
+from services.smoking_logger import log_smoking_event
 from PIL import Image
 from datetime import datetime, timedelta
 
@@ -177,6 +178,10 @@ returning_cooldown: dict = {}
 # =============================================================
 
 pending_unknown_face = None
+
+# Prevent multiple frames from inserting the same unknown customer
+pending_unknown_lock = False
+
 
 # NOTE: NEW_FACE_WAIT_SECONDS, COOLDOWN_SECONDS, and PENDING_EXPIRE_SECONDS
 # are no longer hardcoded here. Use SETTINGS["new_face_delay"],
@@ -416,6 +421,28 @@ def dashboard_data():
         for r in cur.fetchall()
     ]
 
+    # --- Smoking statistics ---
+
+    cur.execute(
+        """
+        SELECT event_type, COUNT(*)
+        FROM smoking_events
+        WHERE DATE(created_at) = CURRENT_DATE
+        GROUP BY event_type
+        """
+    )
+
+    smoking_counts = {
+        "cigarette": 0,
+        "smoke": 0,
+        "vape": 0,
+    }
+
+    for event_type, count in cur.fetchall():
+        smoking_counts[event_type] = count
+
+    total_smoking_events = sum(smoking_counts.values())
+
     # --- Last 7 days chart data from daily_statistics ---
     cur.execute(
         """
@@ -445,6 +472,10 @@ def dashboard_data():
 
     return jsonify(
         {
+            "smoking_events_today": total_smoking_events,
+            "cigarette_count": smoking_counts["cigarette"],
+            "smoke_count": smoking_counts["smoke"],
+            "vape_count": smoking_counts["vape"],
             "total_registered":         total_registered,
             "known_today":              known_today,
             "unknown_today":            unknown_today,
@@ -454,6 +485,49 @@ def dashboard_data():
             "chart":                    chart,
         }
     )
+
+
+
+
+@app.route("/smoking-events")
+def smoking_events():
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT
+            se.customer_type,
+            se.customer_id,
+            se.event_type,
+            se.created_at,
+            COALESCE(
+                c.name,
+                'Unknown #' || se.customer_id::text
+            )
+        FROM smoking_events se
+        LEFT JOIN customers c
+            ON se.customer_type='known'
+           AND c.id=se.customer_id
+        ORDER BY se.id DESC
+        LIMIT 10
+    """)
+
+    rows = cur.fetchall()
+
+    conn.close()
+
+    return jsonify([
+        {
+            "customer": r[4],
+            "type": r[0],
+            "event": r[2],
+            "time": r[3].strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        for r in rows
+    ])
+
+
 
 
 # =============================================================
@@ -631,6 +705,7 @@ def _process_face(face_encoding: np.ndarray) -> tuple:
     global known_cooldown
     global returning_cooldown
     global pending_unknown_face
+    global pending_unknown_lock
     global known_encodings, known_names, known_ids
     global unknown_encodings, unknown_ids
 
@@ -767,6 +842,12 @@ def _process_face(face_encoding: np.ndarray) -> tuple:
     if elapsed < SETTINGS["new_face_delay"]:
         return "New Customer", (0, 0, 255)
 
+    # Another frame is already inserting this person.
+    if pending_unknown_lock:
+        return "New Customer", (0, 0, 255)
+
+    pending_unknown_lock = True
+
 
     print("[DB] Inserting unknown customer...")
 
@@ -819,6 +900,13 @@ def _process_face(face_encoding: np.ndarray) -> tuple:
     # after it has potentially been cleared.
     # ----------------------------------------------------------
 
+    # Safety check: another frame may already have cleared it.
+    if pending_unknown_face is None:
+        print("[WARNING] Pending face already cleared.")
+        refresh_face_cache()
+        returning_cooldown[new_unknown_id] = now
+        return "New Customer", (0, 0, 255)
+
     saved_encoding = pending_unknown_face["encoding"].copy()
 
     pending_unknown_face = None
@@ -869,6 +957,7 @@ def gen_frames():
         
         if _smoking_frame_counter >= SMOKING_DETECT_EVERY_N_FRAMES:
             _smoking_frame_counter = 0
+            print("[ROBOFLOW] Calling detect()")
             _last_smoking_detections = smoking_detector.detect(frame)
 
         # Convert BGR frame to RGB for face_recognition
@@ -906,6 +995,7 @@ def gen_frames():
         for (top, right, bottom, left), face_encoding in zip(
             face_locations, face_encodings_list
         ):
+            smoking_text = ""
             label, color = _process_face(face_encoding)
             face_box = (top, right, bottom, left)
 
@@ -920,11 +1010,80 @@ def gen_frames():
             # ----------------------------------------------------------
 
             smoking_status = analyse_person(
-                matched_person,
-                _last_smoking_detections
+            matched_person,
+            _last_smoking_detections
             )
+
+            # # TEMP TEST
+            # smoking_status["cigarette"] = True
+
+            
+
+            if smoking_status["cigarette"]:
+                smoking_text = "Cigarette Detected"
+
+            elif smoking_status["smoke"]:
+                smoking_text = "Smoke Detected"
+
+            elif smoking_status["vape"]:
+                smoking_text = "Vape Detected"
+            
+
             if any(smoking_status.values()):
                 print(f"[SMOKING] {label} -> {smoking_status}")
+
+                try:
+
+                    # Determine customer type
+                    customer_type = "known"
+                    customer_id = None
+
+                    if label == "Returning Unknown":
+                        customer_type = "unknown"
+
+                    # Find customer ID
+                    if customer_type == "known":
+                        if label in known_names:
+                            customer_id = known_ids[known_names.index(label)]
+
+                    elif customer_type == "unknown":
+                        if matched_person is not None and len(unknown_ids) > 0:
+                            customer_id = unknown_ids[-1]
+
+                    # Log every detected event
+                    if customer_id is not None:
+
+                        if smoking_status["cigarette"]:
+                            print("[LOGGER] Writing cigarette event")
+
+                            log_smoking_event(
+                                customer_type,
+                                customer_id,
+                                "cigarette",
+                                1.0,
+                            )
+                        if smoking_status["smoke"]:
+                            print("[LOGGER] Writing smoke event")
+
+                            log_smoking_event(
+                                customer_type,
+                                customer_id,
+                                "smoke",
+                                1.0,
+                            )
+
+                        if smoking_status["vape"]:
+                            print("[LOGGER] Writing vape event")
+
+                            log_smoking_event(
+                                customer_type,
+                                customer_id,
+                                "vape",
+                                1.0,
+                            )
+
+                except Exception as e:
+                    print("[LOGGER ERROR]", e)
 
             if matched_person:
                 pass
@@ -945,6 +1104,17 @@ def gen_frames():
                 color,
                 2,
             )
+
+            if smoking_text:
+                cv2.putText(
+                    frame,
+                    smoking_text,
+                    (left, bottom + 25),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 255, 255),   # Yellow text
+                    2,
+                )
 
         # Encode frame as JPEG and yield for streaming
         # =============================================================
@@ -1754,5 +1924,3 @@ if __name__ == "__main__":
         port=int(os.environ.get("PORT", 5000)),
         debug=os.environ.get("FLASK_DEBUG", "true").lower() == "true",
     )
-
-

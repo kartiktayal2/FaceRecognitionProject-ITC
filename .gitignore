@@ -2,3 +2,4 @@
 database.db
 temp.jpg
 temp_scan.jpg
+__pycache__/
