@@ -1184,9 +1184,15 @@ function animateCounter(el, target, cardId) {
 function updateCards(data) {
   const fields = [
     { elId: 'val-registered', cardId: 'card-registered', key: 'total_registered' },
-    { elId: 'val-known',      cardId: 'card-known',      key: 'known_today'      },
-    { elId: 'val-unknown',    cardId: 'card-unknown',    key: 'unknown_today'    },
+    { elId: 'val-known',      cardId: 'card-known',      key: 'known_today' },
+    { elId: 'val-unknown',    cardId: 'card-unknown',    key: 'unknown_today' },
     { elId: 'val-returning',  cardId: 'card-returning',  key: 'returning_unknown_today' },
+
+    // Smoking Analytics
+    { elId: 'val-smoking',    cardId: 'card-smoking',    key: 'smoking_events_today' },
+    { elId: 'val-cigarette',  cardId: 'card-cigarette',  key: 'cigarette_count' },
+    { elId: 'val-smoke',      cardId: 'card-smoke',      key: 'smoke_count' },
+    { elId: 'val-vape',       cardId: 'card-vape',       key: 'vape_count' },
   ];
 
   fields.forEach(({ elId, cardId, key }) => {
